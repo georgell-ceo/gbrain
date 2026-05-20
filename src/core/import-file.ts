@@ -237,6 +237,33 @@ export async function importFromContent(
 
   const parsed = parseMarkdown(content, slug + '.md');
 
+  // Entity-slug normalization (v0.34): an entity-typed page (type=person or
+  // type=company) MUST live under its canonical dir prefix (people/ or
+  // companies/). Otherwise the graph fragments — graph queries that filter
+  // by `slug LIKE 'people/%'` miss the bare-slug copy, and link-extractor
+  // regexes that only match the dir-prefixed shape can't find it either.
+  //
+  // Background: this bug surfaced during the 2026-05-20 Iron-Law back-link
+  // rollout when 113 bare-slug duplicate entity pages appeared (78 person,
+  // 35 company). They were imported via some path that fed bare relative
+  // paths (e.g. 'aaron-presley.md' instead of 'people/aaron-presley.md'),
+  // creating side-by-side duplicates of canonical entity pages.
+  //
+  // Auto-correct rather than reject so we don't break a fresh import that
+  // would otherwise succeed; emit a warning so the upstream caller can be
+  // fixed. Skip when slug ALREADY carries any dir prefix (heuristic:
+  // contains '/') — the caller knows what they're doing.
+  let resolvedSlug = slug;
+  if (!slug.includes('/')) {
+    if (parsed.type === 'person') {
+      resolvedSlug = `people/${slug}`;
+      console.warn(`[import] entity-slug auto-prefix: type=person bare slug "${slug}" → "${resolvedSlug}". Caller should pass the canonical dir-prefixed slug.`);
+    } else if (parsed.type === 'company') {
+      resolvedSlug = `companies/${slug}`;
+      console.warn(`[import] entity-slug auto-prefix: type=company bare slug "${slug}" → "${resolvedSlug}". Caller should pass the canonical dir-prefixed slug.`);
+    }
+  }
+
   // Hash includes ALL fields for idempotency (not just compiled_truth + timeline)
   const hash = createHash('sha256')
     .update(JSON.stringify({
@@ -258,9 +285,9 @@ export async function importFromContent(
     tags: parsed.tags,
   };
 
-  const existing = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
+  const existing = await engine.getPage(resolvedSlug, sourceId ? { sourceId } : undefined);
   if (existing?.content_hash === hash && !opts.forceRechunk) {
-    return { slug, status: 'skipped', chunks: 0, parsedPage };
+    return { slug: resolvedSlug, status: 'skipped', chunks: 0, parsedPage };
   }
 
   // Chunk compiled_truth and timeline
@@ -300,7 +327,7 @@ export async function importFromContent(
   // for single-source callers.
   const txOpts = sourceId ? { sourceId } : undefined;
   await engine.transaction(async (tx) => {
-    if (existing) await tx.createVersion(slug, txOpts);
+    if (existing) await tx.createVersion(resolvedSlug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
     // Filename comes from importFromFile path (basename) or the slug tail
@@ -309,17 +336,17 @@ export async function importFromContent(
     // be created). The result drives the recency boost and since/until
     // filters when callers opt in; nothing in the default search path
     // consults it.
-    const filenameForChain = opts.filename ?? slug.split('/').pop() ?? slug;
+    const filenameForChain = opts.filename ?? resolvedSlug.split('/').pop() ?? resolvedSlug;
     const nowDate = new Date();
     const { date: effectiveDate, source: effectiveDateSource } = computeEffectiveDate({
-      slug,
+      slug: resolvedSlug,
       frontmatter: parsed.frontmatter,
       filename: filenameForChain,
       updatedAt: existing?.updated_at ?? nowDate,
       createdAt: existing?.created_at ?? nowDate,
     });
 
-    await tx.putPage(slug, {
+    await tx.putPage(resolvedSlug, {
       type: parsed.type,
       title: parsed.title,
       compiled_truth: parsed.compiled_truth,
@@ -338,20 +365,20 @@ export async function importFromContent(
     }, txOpts);
 
     // Tag reconciliation: remove stale, add current
-    const existingTags = await tx.getTags(slug, txOpts);
+    const existingTags = await tx.getTags(resolvedSlug, txOpts);
     const newTags = new Set(parsed.tags);
     for (const old of existingTags) {
-      if (!newTags.has(old)) await tx.removeTag(slug, old, txOpts);
+      if (!newTags.has(old)) await tx.removeTag(resolvedSlug, old, txOpts);
     }
     for (const tag of parsed.tags) {
-      await tx.addTag(slug, tag, txOpts);
+      await tx.addTag(resolvedSlug, tag, txOpts);
     }
 
     if (chunks.length > 0) {
-      await tx.upsertChunks(slug, chunks, txOpts);
+      await tx.upsertChunks(resolvedSlug, chunks, txOpts);
     } else {
       // Content is empty — delete stale chunks so they don't ghost in search results
-      await tx.deleteChunks(slug, txOpts);
+      await tx.deleteChunks(resolvedSlug, txOpts);
     }
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
@@ -375,24 +402,24 @@ export async function importFromContent(
       // Forward: markdown guide → code page (this guide documents that code)
       try {
         await tx.addLink(
-          slug, codeSlug,
+          resolvedSlug, codeSlug,
           ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
-          'documents', 'markdown', slug, 'compiled_truth',
+          'documents', 'markdown', resolvedSlug, 'compiled_truth',
           linkOpts,
         );
       } catch { /* code page not yet imported — reconcile-links will catch it */ }
       // Reverse: code page → markdown guide (this code is documented by the guide)
       try {
         await tx.addLink(
-          codeSlug, slug,
-          ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
+          codeSlug, resolvedSlug,
+          ref.path, 'documented_by', 'markdown', resolvedSlug, 'compiled_truth',
           linkOpts,
         );
       } catch { /* same reason — silent skip */ }
     }
   });
 
-  return { slug, status: 'imported', chunks: chunks.length, parsedPage };
+  return { slug: resolvedSlug, status: 'imported', chunks: chunks.length, parsedPage };
 }
 
 /**

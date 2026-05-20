@@ -2,6 +2,42 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [Unreleased]
+
+**Iron-Law back-links: every page mentioning a person/company now creates a back-link timeline entry + graph edge on that entity.**
+
+This implements the user's "Iron Law" convention literally (CLAUDE.md): _"every mention of a person/company with a brain page MUST create a back-link from that entity's page to the mentioning page"_. Closes the orphan loop for collector-imported pages (meetings, transcripts, slack/jira/twitter/research/confluence sources) at the structural level — they show up in the graph because entities link to them, not because the metric exempted them.
+
+### What changed
+
+- `src/core/back-link-writer.ts` (new): For every outbound entity ref a `put_page` produces (people/* or companies/* targets), the writer creates two artifacts on the entity: (a) a `mentioned_in` graph edge from entity → mentioning page, and (b) a timeline entry in Iron-Law format (`Referenced in [title](slug)`). Scope: only fires for entity targets; skipped when source is itself an entity (no self-back-links); deduped per (target, date) via existing unique indexes.
+- `src/core/operations.ts`: `runAutoLink` now returns its outbound candidates, and `put_page` calls `writeBackLinks` with them after link reconciliation. Surfaces `auto_backlink: {edges_created, timeline_created, skipped, errors}` on the put_page response.
+- `src/core/migrate.ts` migration 55 (`links_link_source_allow_auto_backlink`): widens the `links.link_source` check constraint to allow `'auto_backlink'` alongside the existing `markdown`/`frontmatter`/`manual`. Embedded schemas updated in lockstep.
+- `src/commands/backfill-backlinks.ts` (new): `gbrain backfill-backlinks [--type X] [--limit N] [--dry-run] [--json]`. Walks existing pages, re-extracts entity refs, and runs the writer on each. Idempotent (ON CONFLICT DO NOTHING). Use after upgrade or after fixing collector pipelines.
+- Config flag `auto_backlink_timeline` (default ON). Disable with `gbrain config set auto_backlink_timeline false` if the timeline noise becomes a problem.
+- 28 new tests in `test/back-link-writer.test.ts` covering pure helpers + integration with PGLite (write, dedup, idempotency, scope rules, config flag behavior).
+
+### Companion: orphan-exclusion list narrowed
+
+The exclusion list now covers ONLY pages where having zero inbound edges is structurally guaranteed (pseudo-pages like `_atlas`, `*/readme` stubs, `output/`, `dashboards/`, `templates/`, `scratch/`, `thoughts/`, `catalog/`, `entities/`). `meetings/`, `transcripts/`, and `sources/{slack,jira,twitter,research,confluence}/` are NOT excluded — Option A (this PR) is the principled mechanism for keeping them out of the orphan count, not the exclusion list.
+
+- `src/core/orphan-exclusion.ts` (new): single source of truth for the exclusion list. Exports `shouldExclude(slug)` and `buildOrphanExclusionSql(alias)`.
+- `src/core/postgres-engine.ts` + `src/core/pglite-engine.ts`: `getHealth().orphan_pages` applies the SQL exclusion clause so `no_orphans_score` doesn't double-count truly inbound-impossible pages.
+
+### Companion fix: gbrain-integrations/fellow-collector
+
+`fellow-collector.mjs` now writes attendees as YAML `attendees: [...]` frontmatter AND `[[people/slug|Display]]` wikilinks in the body. Before, attendees were bare names in markdown text — gbrain's link extractor couldn't resolve them, so the Iron-Law writer had nothing to back-link from. With this fix every Fellow sync produces resolvable entity refs and the back-link writer creates the entity ↔ meeting edges automatically.
+
+### Entity-slug auto-prefix safety net
+
+`src/core/import-file.ts`: when an entity-typed page (`type=person` or `type=company`) is being written with a bare slug (no `/`), `importFromContent` auto-prefixes `people/` or `companies/` and logs a warning. Surfaced during the 2026-05-20 rollout when an upstream caller fed bare paths and created 113 duplicate entity pages. Defensive at the import layer regardless of which caller misbehaves. New test file: `test/entity-slug-auto-prefix.test.ts` (5 tests).
+
+### Operational notes
+
+- Existing brains: run `gbrain backfill-backlinks --dry-run` first to estimate. A 1370-page sample produced 1180 new edges + timeline entries.
+- New brains: the writer fires on every `put_page` automatically. No backfill needed.
+- Reconciliation: the writer is write-only in v1. If a source page is rewritten and the entity mention is removed, the back-link timeline entry stays. Tracked as follow-up — needs an `origin_slug` column on `timeline_entries`.
+
 ## [0.37.2.0] - 2026-05-19
 
 **Your grading script writes "unresolvable" verdicts now. Before this fix, every single one was rejected at the database layer — 0 of 34 writes landed in a recent production run.**
@@ -2501,6 +2537,7 @@ The release is eval-gated by design (per /office-hours, /plan-ceo-review, and Co
 ### Process notes
 
 The plan went through `/office-hours` → `/plan-ceo-review` → Codex outside-voice → `/plan-eng-review`. Each pass changed the shape. Office-hours locked the headline + eval-first principle. CEO review proposed 8 deliverables in SCOPE EXPANSION mode. Codex pushed back on 5 fronts (sequencing, eval methodology, library choice, layer separation, schema design) and was accepted on all 5 + 3 substrate defects. Eng review locked the ranking formula, the two-layer eval gate, the 10-case test list, and the SQL-level typeFilter. Net result: scope reduced ~75% from the cathedral version while shipping the actual wedge users ask for.
+
 ## [0.33.0] - 2026-05-11
 
 **`gbrain recall` now answers "what changed since last time?" in one command, and thin-client installs stop silently lying about empty results.**

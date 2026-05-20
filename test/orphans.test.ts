@@ -46,6 +46,17 @@ describe('shouldExclude', () => {
     expect(shouldExclude('projects/acme/log')).toBe(true);
   });
 
+  test('excludes auto-generated /readme suffix', () => {
+    expect(shouldExclude('hiring/readme')).toBe(true);
+    expect(shouldExclude('companies/readme')).toBe(true);
+    expect(shouldExclude('projects/acme/readme')).toBe(true);
+  });
+
+  test('does NOT exclude a slug that just contains "readme" mid-segment', () => {
+    expect(shouldExclude('docs/readme-template')).toBe(false);
+    expect(shouldExclude('companies/readme-corp')).toBe(false);
+  });
+
   test('excludes raw source slugs', () => {
     expect(shouldExclude('companies/acme/raw/crustdata')).toBe(true);
   });
@@ -84,6 +95,29 @@ describe('shouldExclude', () => {
 
   test('excludes first-segment: entities', () => {
     expect(shouldExclude('entities/product-hunt')).toBe(true);
+  });
+
+  test('does NOT exclude meetings/ — they should be back-linked via Iron-Law writer', () => {
+    expect(shouldExclude('meetings/2025-10-02-all-hands')).toBe(false);
+    expect(shouldExclude('meetings/2026-01-15-weekly-1-1')).toBe(false);
+  });
+
+  test('does NOT exclude transcripts/ — they should be back-linked via Iron-Law writer', () => {
+    expect(shouldExclude('transcripts/claude-code/2026-04-15-foo')).toBe(false);
+    expect(shouldExclude('transcripts/granola/some-meeting')).toBe(false);
+  });
+
+  test('does NOT exclude collector sub-trees under sources/ — they should be back-linked', () => {
+    expect(shouldExclude('sources/slack/channel/2026-01-01-msg')).toBe(false);
+    expect(shouldExclude('sources/jira/PROJ-123')).toBe(false);
+    expect(shouldExclude('sources/twitter/some-bookmark')).toBe(false);
+    expect(shouldExclude('sources/research/2026-01-15-paper')).toBe(false);
+    expect(shouldExclude('sources/confluence/space/page-name')).toBe(false);
+  });
+
+  test('does NOT exclude curated sources/ pages outside collector sub-trees', () => {
+    expect(shouldExclude('sources/ceo-llm-wiki-archive')).toBe(false);
+    expect(shouldExclude('sources/chatgpt-memory-archive-2025')).toBe(false);
   });
 
   test('does NOT exclude a normal content page', () => {

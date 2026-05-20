@@ -28,6 +28,7 @@ import {
   COLUMN_NAME_REGEX,
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
+import { buildOrphanExclusionSql } from './orphan-exclusion.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput, StaleChunkRow,
@@ -2277,6 +2278,10 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
+    // Raw query — exclusion is applied in TS by callers (src/commands/orphans.ts
+    // shouldExclude). Two-stage filter keeps the engine method generic for any
+    // caller that needs the unfiltered set, while the standard reporting path
+    // applies the canonical filter from src/core/orphan-exclusion.ts.
     const sql = this.sql;
     // Soft-delete filter on BOTH sides:
     //   - candidate: p.deleted_at IS NULL — soft-deleted pages aren't orphan candidates
@@ -3632,6 +3637,14 @@ export class PostgresEngine implements BrainEngine {
     // SQL required both — docs now match code so users can trust the
     // number. A hub page that links out to many but has no back-references
     // is working as intended, not an orphan.
+    //
+    // The orphan_pages count also applies the canonical exclusion list
+    // (src/core/orphan-exclusion.ts) so pages where having zero links is
+    // expected (collector-imported meetings/sources, auto-generated index
+    // pages, scratch space) don't drag down the no_orphans_score component.
+    // SQL fragment is built from the same constants the TS shouldExclude
+    // uses; if you change one, you must change the other.
+    const exclusionSql = buildOrphanExclusionSql('p');
     const [h] = await sql`
       WITH entity_pages AS (
         SELECT id, slug FROM pages WHERE type IN ('person', 'company')
@@ -3646,6 +3659,7 @@ export class PostgresEngine implements BrainEngine {
         (SELECT count(*) FROM pages p
          WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
+           ${sql.unsafe(exclusionSql)}
         ) as orphan_pages,
         (SELECT count(*) FROM links l
          WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)

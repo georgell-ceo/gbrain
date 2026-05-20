@@ -114,6 +114,45 @@ describe('Bug 11 — orphan_pages is "no inbound links"', () => {
   });
 });
 
+describe('orphan_pages applies canonical exclusion list', () => {
+  test('readme stubs and pseudo-pages are excluded from orphan_pages', async () => {
+    // Three islanded pages — one is "real content" (counts as orphan),
+    // two are exempted by the canonical filter (readme stub, pseudo-page).
+    // meetings/ and sources/slack/ are NOT exempted here — Option A's
+    // back-link writer is the mechanism that keeps them out of the orphan
+    // count, NOT the exclusion list.
+    await engine.putPage('topics/real-orphan', { type: 'note', title: 'Real', compiled_truth: 'x', frontmatter: {} });
+    await engine.putPage('hiring/readme', { type: 'note', title: 'Hiring Readme', compiled_truth: 'stub', frontmatter: {} });
+    await engine.putPage('_atlas', { type: 'note', title: 'Atlas', compiled_truth: 'pseudo', frontmatter: {} });
+
+    const h = await engine.getHealth();
+    expect(h.orphan_pages).toBe(1);
+  });
+
+  test('output/, dashboards/, templates/ are excluded from orphan_pages', async () => {
+    await engine.putPage('topics/real-orphan', { type: 'note', title: 'Real', compiled_truth: 'x', frontmatter: {} });
+    await engine.putPage('output/2026-q1-export', { type: 'note', title: 'Export', compiled_truth: 'gen', frontmatter: {} });
+    await engine.putPage('dashboards/metrics', { type: 'note', title: 'Metrics', compiled_truth: 'gen', frontmatter: {} });
+    await engine.putPage('templates/meeting', { type: 'note', title: 'Template', compiled_truth: 'gen', frontmatter: {} });
+
+    const h = await engine.getHealth();
+    expect(h.orphan_pages).toBe(1);
+  });
+
+  test('meetings/ and collector sources/ are NOT excluded from orphan_pages (back-link writer territory)', async () => {
+    // These page kinds SHOULD show as orphans when they have zero entity
+    // back-links. The Iron-Law back-link writer in src/core/back-link-writer.ts
+    // is the mechanism that creates those back-links. If it doesn't run
+    // (config disabled, no resolvable entities), the pages legitimately
+    // count as orphans.
+    await engine.putPage('meetings/2026-01-15-empty', { type: 'meeting', title: 'Empty', compiled_truth: 'no refs', frontmatter: {} });
+    await engine.putPage('sources/slack/empty', { type: 'source', title: 'Empty', compiled_truth: 'no refs', frontmatter: {} });
+
+    const h = await engine.getHealth();
+    expect(h.orphan_pages).toBe(2);
+  });
+});
+
 describe('Bug 11 — doctor renders brain_score breakdown', () => {
   test('doctor source contains brain_score breakdown rendering', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();

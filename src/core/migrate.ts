@@ -3766,6 +3766,27 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 81,
+    name: 'links_link_source_allow_auto_backlink',
+    // v0.34 — Iron-Law back-link writer (src/core/back-link-writer.ts) emits
+    // edges with link_source='auto_backlink' so future reconciliation can
+    // distinguish them from markdown extraction, frontmatter-derived, and
+    // user-created manual edges. The v0.13 check constraint only allowed
+    // ('markdown', 'frontmatter', 'manual') and rejected the new value.
+    //
+    // Renumbered from #55 to #81 during cherry-pick onto v0.37.x — master
+    // had claimed #55 through #80 in the intervening commits.
+    //
+    // The drop/recreate must happen in one transaction so a crash mid-
+    // migration can't leave the table without a check constraint.
+    idempotent: true,
+    sql: `
+      ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+      ALTER TABLE links ADD CONSTRAINT links_link_source_check
+        CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'auto_backlink'));
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
