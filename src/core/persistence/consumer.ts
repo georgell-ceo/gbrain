@@ -19,6 +19,8 @@ import { maybeRefreshPlannerStats } from '../planner-stats.ts';
 import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { faultPoint } from './fault-points.ts';
 import { releaseAbandonedClaims } from './effect-journal.ts';
+import { isStatementTimeoutError } from '../retry-matcher.ts';
+import { AbandonedError, settleOrAbandon } from './settle-or-abandon.ts';
 
 type PhaseObservation = { name: string; started_at: string; deadline_exceeded: boolean; attempt: number; first_conn_ms?: number };
 /** When this process started; on PGLite no claim written earlier can belong to a live owner. */
@@ -55,6 +57,15 @@ export async function runResidentProjectionInvocation(engine: BrainEngine, hostI
 const PARKED_WORKER: Promise<void> = Promise.resolve();
 
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig, signal?: AbortSignal) => Promise<PreparedMutation>;
+
+/** Statement timeout that is not an intentional user-request cancel. */
+function statementTimeoutFollowUp(error: unknown): boolean {
+  if (error instanceof Error && /canceling statement due to user request/i.test(error.message)) return false;
+  const message = (error as { message?: unknown } | null)?.message;
+  if (typeof message === 'string' && /canceling statement due to user request/i.test(message)) return false;
+  return isStatementTimeoutError(error);
+}
+
 export class PersistenceConsumer {
   private stopping = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -514,16 +525,37 @@ export class PersistenceConsumer {
         await releaseUnpublishedClaim(this.engine, row, observation.deadline_exceeded ? 'preparation_deadline' : 'consumer_stopping');
         return false;
       }
-      const current = await getWriteRequestById(this.engine, row.id);
-      if (current && !isTerminal(current) && current.execution_token === row.execution_token && !current.recovery) {
-        const done = await finishUnpublishedFailure(this.engine, current, error, preparationActive ? 'preparation' : 'publication');
-        if (done.state === 'failed') this.log(preparationActive ? 'preparation' : 'publication', done.error_code ?? 'storage_error', done.error_message ?? undefined);
-        return this.settled(done);
+      // phase() still awaits the cancelled query so the pool client returns.
+      // The hang to cap is a renewal that never settles, and a statement-timeout
+      // follow-up (release/read) that waits on the same saturated pool.
+      const followUp = async (): Promise<boolean> => {
+        const current = await getWriteRequestById(this.engine, row.id);
+        if (current && !isTerminal(current) && current.execution_token === row.execution_token && !current.recovery) {
+          const done = await finishUnpublishedFailure(this.engine, current, error, preparationActive ? 'preparation' : 'publication');
+          if (done.state === 'failed') this.log(preparationActive ? 'preparation' : 'publication', done.error_code ?? 'storage_error', done.error_message ?? undefined);
+          return this.settled(done);
+        }
+        throw error;
+      };
+      if (statementTimeoutFollowUp(error)) {
+        try {
+          return await settleOrAbandon(followUp(), this.opts.phaseMs ?? 5000);
+        } catch (followUpError) {
+          if (followUpError instanceof AbandonedError || statementTimeoutFollowUp(followUpError)) {
+            this.report(error);
+            return false;
+          }
+          throw followUpError;
+        }
       }
-      throw error;
+      return await followUp();
     } finally {
       closed = true; clearInterval(interval); if (timeout) clearTimeout(timeout);
-      this.abort.signal.removeEventListener('abort', stop); this.preparing.delete(row.id); this.executing.delete(row.id); await renewing;
+      this.abort.signal.removeEventListener('abort', stop); this.preparing.delete(row.id); this.executing.delete(row.id);
+      if (renewing) {
+        try { await settleOrAbandon(renewing, this.opts.phaseMs ?? 5000); }
+        catch { claimLive = false; }
+      }
     }
   }
   /** #5984: a claimed bulk sync head takes its directly following group members along; one row runs the single path. */
