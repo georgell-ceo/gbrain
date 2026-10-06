@@ -1,5 +1,5 @@
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 07f6716702ac888215c86ad6e0071aaf55ae519c..e5800bca79ea3e5d638176bcdfa6124dbb94e18b 100644
+index 07f6716..d7e007f 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
 @@ -78,6 +78,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -69,19 +69,32 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..e5800bca79ea3e5d638176bcdfa6124d
      stream && (stream.destroy(err), stream = null)
      query && queryError(query, err)
      initial && (queryError(initial, err), initial = null)
-@@ -447,6 +457,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -447,8 +457,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      socket.removeAllListeners()
      socket = null
  
+-    if (initial)
 +    if (cancelMessage)
 +      return cancelError || hadError
 +        ? cancelReject(cancelError || Errors.connection('CONNECTION_CLOSED', options))
 +        : cancelResolve()
 +
-     if (initial)
++    if (initial) {
++      // A startup query can still be in flight. Reject it so its promise is
++      // observed, and clear the error so reconnect does not replay it onto
++      // the parked caller query.
++      if (query) {
++        const reason = errorResponse || Errors.connection('CONNECTION_CLOSED', options, socket)
++        try { query.reject(reason) } catch { /* already settled */ }
++      }
++      query = results = errorResponse = null
++      result = new Result()
        return reconnect()
++    }
  
-@@ -533,6 +548,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+     closedTime = performance.now()
+@@ -533,6 +558,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function ReadyForQuery(x) {
@@ -89,8 +102,17 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..e5800bca79ea3e5d638176bcdfa6124d
      if (query) {
        if (errorResponse) {
          query.retried
-@@ -564,10 +580,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-         return fetchArrayTypes()
+@@ -561,13 +587,20 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+ 
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Nobody awaits this startup query. A statement timeout rejects it
++        // and the parked caller query together; observe this promise so the
++        // caller can log 57014 without an unhandledRejection.
++        const pendingTypes = fetchArrayTypes()
++        pendingTypes.catch(() => { /* startup query observed */ })
++        return pendingTypes
        }
  
 -      initial && !initial.reserve && execute(initial)
@@ -104,7 +126,7 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..e5800bca79ea3e5d638176bcdfa6124d
      }
  
      while (sent.length && (query = sent.shift()) && (query.active = true, query.cancelled))
-@@ -580,7 +598,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -580,7 +613,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        ? !connection.reserved.release && x[5] === 73 // I
          ? ending
            ? terminate()
@@ -113,8 +135,16 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..e5800bca79ea3e5d638176bcdfa6124d
          : connection.reserved()
        : ending
          ? terminate()
+@@ -807,6 +840,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       backendParameters.in_hot_standby = b.pg_is_in_recovery ? 'on' : 'off'
+     }
+     query.execute()
++    query.catch(() => { /* startup probe observed */ })
+   }
+ 
+   function ErrorResponse(x) {
 diff --git a/cjs/src/index.js b/cjs/src/index.js
-index f09c61c7e998f411560b95c9a8e1ed6a97972c11..c72e4135627296dd00179e30d02094d591047267 100644
+index f09c61c..c72e413 100644
 --- a/cjs/src/index.js
 +++ b/cjs/src/index.js
 @@ -200,40 +200,134 @@ function Postgres(a, b) {
@@ -376,7 +406,7 @@ index f09c61c7e998f411560b95c9a8e1ed6a97972c11..c72e4135627296dd00179e30d02094d5
      socket          : o.socket,
      transform       : parseTransform(o.transform || { undefined: undefined }),
 diff --git a/cjs/src/query.js b/cjs/src/query.js
-index 45327f2fabcdbf8f8ec5020675012c310c04fee6..1d092504ac1ce1fdac78cb0c4ef3a8aa957676e4 100644
+index 45327f2..1d09250 100644
 --- a/cjs/src/query.js
 +++ b/cjs/src/query.js
 @@ -23,11 +23,12 @@ const Query = module.exports.Query = class Query extends Promise {
@@ -420,7 +450,7 @@ index 45327f2fabcdbf8f8ec5020675012c310c04fee6..1d092504ac1ce1fdac78cb0c4ef3a8aa
            this.execute()
            return promise
 diff --git a/cjs/src/queue.js b/cjs/src/queue.js
-index 8438f5da92cf7637d98a33491d75c75b1c817c25..c444310ff87b0ac81fd19cd3170a0ba607a66781 100644
+index 8438f5d..c444310 100644
 --- a/cjs/src/queue.js
 +++ b/cjs/src/queue.js
 @@ -15,6 +15,7 @@ function Queue(initial = []) {
@@ -432,7 +462,7 @@ index 8438f5da92cf7637d98a33491d75c75b1c817c25..c444310ff87b0ac81fd19cd3170a0ba6
        const out = xs[index++]
  
 diff --git a/src/connection.js b/src/connection.js
-index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9a61cd9dcc9772e843842284e516641cb55178d0 100644
+index 1b1cccd..d980af2 100644
 --- a/src/connection.js
 +++ b/src/connection.js
 @@ -78,6 +78,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -502,19 +532,32 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9a61cd9dcc9772e843842284e516641c
      stream && (stream.destroy(err), stream = null)
      query && queryError(query, err)
      initial && (queryError(initial, err), initial = null)
-@@ -447,6 +457,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -447,8 +457,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      socket.removeAllListeners()
      socket = null
  
+-    if (initial)
 +    if (cancelMessage)
 +      return cancelError || hadError
 +        ? cancelReject(cancelError || Errors.connection('CONNECTION_CLOSED', options))
 +        : cancelResolve()
 +
-     if (initial)
++    if (initial) {
++      // A startup query can still be in flight. Reject it so its promise is
++      // observed, and clear the error so reconnect does not replay it onto
++      // the parked caller query.
++      if (query) {
++        const reason = errorResponse || Errors.connection('CONNECTION_CLOSED', options, socket)
++        try { query.reject(reason) } catch { /* already settled */ }
++      }
++      query = results = errorResponse = null
++      result = new Result()
        return reconnect()
++    }
  
-@@ -533,6 +548,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+     closedTime = performance.now()
+@@ -533,6 +558,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function ReadyForQuery(x) {
@@ -522,8 +565,17 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9a61cd9dcc9772e843842284e516641c
      if (query) {
        if (errorResponse) {
          query.retried
-@@ -564,10 +580,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-         return fetchArrayTypes()
+@@ -561,13 +587,20 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+ 
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Nobody awaits this startup query. A statement timeout rejects it
++        // and the parked caller query together; observe this promise so the
++        // caller can log 57014 without an unhandledRejection.
++        const pendingTypes = fetchArrayTypes()
++        pendingTypes.catch(() => { /* startup query observed */ })
++        return pendingTypes
        }
  
 -      initial && !initial.reserve && execute(initial)
@@ -537,7 +589,7 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9a61cd9dcc9772e843842284e516641c
      }
  
      while (sent.length && (query = sent.shift()) && (query.active = true, query.cancelled))
-@@ -580,7 +598,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -580,7 +613,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        ? !connection.reserved.release && x[5] === 73 // I
          ? ending
            ? terminate()
@@ -546,8 +598,16 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9a61cd9dcc9772e843842284e516641c
          : connection.reserved()
        : ending
          ? terminate()
+@@ -807,6 +840,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       backendParameters.in_hot_standby = b.pg_is_in_recovery ? 'on' : 'off'
+     }
+     query.execute()
++    query.catch(() => { /* startup probe observed */ })
+   }
+ 
+   function ErrorResponse(x) {
 diff --git a/src/index.js b/src/index.js
-index c7fba3dace20173f4cb13f3f138bb6d213b43683..e9af339e13ee79e38d13fe82733ed17dc7529b46 100644
+index c7fba3d..e9af339 100644
 --- a/src/index.js
 +++ b/src/index.js
 @@ -200,40 +200,134 @@ function Postgres(a, b) {
@@ -809,7 +869,7 @@ index c7fba3dace20173f4cb13f3f138bb6d213b43683..e9af339e13ee79e38d13fe82733ed17d
      socket          : o.socket,
      transform       : parseTransform(o.transform || { undefined: undefined }),
 diff --git a/src/query.js b/src/query.js
-index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..96967780bdb55671bdcdda0fd0bb6e718e0a0e78 100644
+index 0d44a15..9696778 100644
 --- a/src/query.js
 +++ b/src/query.js
 @@ -23,11 +23,12 @@ export class Query extends Promise {
@@ -853,7 +913,7 @@ index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..96967780bdb55671bdcdda0fd0bb6e71
            this.execute()
            return promise
 diff --git a/src/queue.js b/src/queue.js
-index c4ef97164f057db99dce1b9af3401dbb1af37e31..8fba891b879e8f5c7fdb03ea0590753663c824c3 100644
+index c4ef971..8fba891 100644
 --- a/src/queue.js
 +++ b/src/queue.js
 @@ -15,6 +15,7 @@ function Queue(initial = []) {
@@ -865,7 +925,7 @@ index c4ef97164f057db99dce1b9af3401dbb1af37e31..8fba891b879e8f5c7fdb03ea05907536
        const out = xs[index++]
  
 diff --git a/types/index.d.ts b/types/index.d.ts
-index 13c3432f761e2c2ee5b7dc1bdafe93e49f993dc7..19103a998359c7277cd966c246cf245aedec4297 100644
+index 13c3432..19103a9 100644
 --- a/types/index.d.ts
 +++ b/types/index.d.ts
 @@ -119,6 +119,11 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
