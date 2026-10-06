@@ -339,6 +339,13 @@
         },
         {
           "handlers": [
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/ready"
+        },
+        {
+          "handlers": [
             "rateLimit#2",
             "rateLimit#3",
             "jsonParser",
@@ -1052,6 +1059,13 @@
           ],
           "method": "get",
           "path": "/health"
+        },
+        {
+          "handlers": [
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/ready"
         },
         {
           "handlers": [

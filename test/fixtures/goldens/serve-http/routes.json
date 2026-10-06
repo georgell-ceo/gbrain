@@ -143,6 +143,14 @@
     },
     {
       "handlers": [
+        "<inline>"
+      ],
+      "method": "get",
+      "path": "/ready",
+      "when": []
+    },
+    {
+      "handlers": [
         "adminLimits.total",
         "adminLimits.failures",
         "express.json()",
