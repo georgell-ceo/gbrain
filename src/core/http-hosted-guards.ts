@@ -5,6 +5,10 @@
  */
 import { installHostedHttpFatalHandlers } from './http-fatal.ts';
 import {
+  createHttpPoolWatchdog,
+  type HttpPoolWatchdogEngine,
+} from './http-pool-watchdog.ts';
+import {
   HttpInflightGate,
   HttpPipelineWatchdog,
   resolveHttpWatchdogConfig,
@@ -24,11 +28,13 @@ const attached = new WeakMap<object, HostedHttpGuards>();
 export function createHostedHttpGuards(
   env: Record<string, string | undefined> = process.env,
   warn?: (msg: string) => void,
+  engine?: HttpPoolWatchdogEngine,
 ): HostedHttpGuards {
   const config = resolveHttpWatchdogConfig(env, warn);
   const watchdog = new HttpPipelineWatchdog(config);
   const gate = new HttpInflightGate(config.maxInflight, config.inflightWaitMs);
   let fatalInstalled = false;
+  let poolWatchdogLabel = 'off';
   const guards: HostedHttpGuards = {
     config,
     watchdog,
@@ -37,13 +43,17 @@ export function createHostedHttpGuards(
       watchdog.start();
       fatalInstalled = installFatal && config.fatalExit;
       const uninstall = fatalInstalled ? installHostedHttpFatalHandlers() : () => {};
+      const pool = fatalInstalled ? createHttpPoolWatchdog(engine, { env, warn }) : undefined;
+      poolWatchdogLabel = pool?.label ?? 'off';
+      const stopPool = pool?.start() ?? (() => {});
       return () => {
         uninstall();
         watchdog.stop();
+        stopPool();
       };
     },
     readyLine(port: number) {
-      return `[serve-http] Ready: http://localhost:${port}/ready (pipeline=${config.pipelineMs}ms heartbeat=${config.heartbeatMs}ms min_inflight=${config.minInflight}; max_inflight=${config.maxInflight} wait=${config.inflightWaitMs}ms; fatal_exit=${fatalInstalled ? 'on' : 'off'})`;
+      return `[serve-http] Ready: http://localhost:${port}/ready (pipeline=${config.pipelineMs}ms heartbeat=${config.heartbeatMs}ms min_inflight=${config.minInflight}; max_inflight=${config.maxInflight} wait=${config.inflightWaitMs}ms; fatal_exit=${fatalInstalled ? 'on' : 'off'}; pool_watchdog=${poolWatchdogLabel})`;
     },
   };
   return guards;
