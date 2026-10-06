@@ -10,9 +10,13 @@
 
 One in-flight search does not flip `/ready`. The pipeline check needs at least two acquired `POST /mcp` handlers (the default), the oldest older than the window, and no completion in that window. Requests waiting for a slot are not counted.
 
-An unhandled rejection, including an unhandled statement timeout (`57014`, `canceling statement due to statement timeout`), exits the process with status 1 so the host can restart it. Search timeouts that are already caught stay fail-open and do not exit. `GBRAIN_HTTP_FATAL_EXIT=0` turns the exit off.
+An unhandled rejection, including an unhandled statement timeout (`57014`, `canceling statement due to statement timeout`), exits the process with status 1 so the host can restart it. Search timeouts that are already caught stay fail-open and do not exit. A statement timeout on the driver's startup types query is observed inside the driver, so the caller's caught 57014 stays a log line. `GBRAIN_HTTP_FATAL_EXIT=0` turns the exit off.
 
-`GBRAIN_SERVE_STALL_WATCHDOG_MS` is a different, opt-in control. It kills the process when the main thread stops running timers at all (a synchronous wedge). It stays off unless you set it. A saturated pool with a live event loop is what `/ready` and the fatal exit cover.
+`GBRAIN_SERVE_STALL_WATCHDOG_MS` is a different, opt-in control. It kills the process when the main thread stops running timers at all (a synchronous wedge). It stays off unless you set it.
+
+A starved client pool with a live event loop does not fail `/ready` and raises no exception, so a host that restarts only on process exit would wait forever. The pool watchdog probes database readiness on an interval and exits with status 70 after sustained `pool_starved` or `unknown` verdicts. `server_unreachable` uses three times that fail count. `client_misconfigured` does not exit. The first 60 seconds after start are a grace period. `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0` keeps the process up.
+
+After an aborted statement, cancel is waited on only until `GBRAIN_HTTP_ABORT_CANCEL_MS` (default 5000). When that deadline wins, the reserved connection is discarded so the pool slot returns.
 
 ## Environment
 
@@ -24,7 +28,10 @@ An unhandled rejection, including an unhandled statement timeout (`57014`, `canc
 | `GBRAIN_HTTP_HEALTH_DEEP` | off | `1` makes `GET /health?deep=1` consult the watchdog. |
 | `GBRAIN_HTTP_MAX_INFLIGHT` | `6` | Concurrent `POST /mcp` handlers. Extra requests wait, then HTTP 503 `server busy`. `0` disables the cap. |
 | `GBRAIN_HTTP_INFLIGHT_WAIT_MS` | `15000` | How long a request waits for a slot. |
-| `GBRAIN_HTTP_FATAL_EXIT` | on | `0` keeps the process up after an unhandled rejection. |
+| `GBRAIN_HTTP_FATAL_EXIT` | on | `0` keeps the process up after an unhandled rejection, and turns the pool watchdog off. |
+| `GBRAIN_HTTP_POOL_WATCHDOG_MS` | `15000` | How often the pool watchdog probes. `0` turns it off. |
+| `GBRAIN_HTTP_POOL_WATCHDOG_FAILS` | `4` | Consecutive `pool_starved` or `unknown` probes before exit 70. `server_unreachable` waits three times this long. |
+| `GBRAIN_HTTP_ABORT_CANCEL_MS` | `5000` | After an abort, how long to wait for cancel before discarding the reserved connection. |
 | `GBRAIN_SERVE_STALL_WATCHDOG_MS` | off | Optional synchronous-loop kill. Floor 15000. |
 
 Invalid numbers log a warning and keep the default.

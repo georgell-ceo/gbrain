@@ -32,7 +32,10 @@ The patch adds abort-aware reservation, reserved/transaction-owner discard,
 CancelRequest settlement tracking and ownership/pipeline fences. It also
 terminates, instead of reusing, a pooled connection or released reservation
 whose last ReadyForQuery status is not idle, and reports each discard through
-the `onpoisoned(status)` option (#5730). Cancellation
+the `onpoisoned(status)` option (#5730). The startup array-types query is
+observed, so a statement timeout on that query does not become an unhandled
+rejection, and a socket drop during startup rejects the in-flight startup
+statement instead of replaying the error onto the parked caller query. Cancellation
 must settle or retire the connection before another query can own it. This
 is necessary for worker admission, query timeout and lease-release safety.
 See issues #5466 and #5560 and `test/e2e/persistence-chaos.test.ts`.
