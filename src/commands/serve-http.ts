@@ -826,7 +826,7 @@ export async function buildServeHttpApp(app: express.Express, engine: BrainEngin
     requireAdmin, adminLimits, ccRateLimiter, ingestRateLimiter, githubWebhookLimiter,
     metricsCounters, sseClients, broadcastEvent,
   };
-  const hosted = createHostedHttpGuards();
+  const hosted = createHostedHttpGuards(process.env, undefined, engine);
   attachHostedHttpGuards(ctx, hosted);
 
   mountOAuth(app, ctx);

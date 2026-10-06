@@ -39,6 +39,9 @@ For one hosted replica on a transaction pooler, use port 6543 as the database UR
 - Hosted HTTP exits on `unhandledRejection` and `uncaughtException`, including an unhandled statement timeout, without waiting on pool cleanup.
 - `GET /ready`, optional deep health, an in-process pipeline watchdog, and a soft cap on concurrent `POST /mcp` handlers.
 - Persistence renewal waits and statement-timeout follow-up queries are hard-capped so a 57014 cannot leave unfinished work pinned on the event loop. The original query is still awaited so its pool client can return.
+- Hosted HTTP probes database readiness on an interval and exits with status 70 after sustained client-pool starvation, so a live process with no free pool slot still restarts. `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0` keeps it up. The first 60 seconds after start are ignored.
+- A statement timeout on the driver's startup types query is observed, so a caught 57014 stays a logged persistence failure.
+- After an aborted statement, cancel is bounded (`GBRAIN_HTTP_ABORT_CANCEL_MS`, default 5 seconds). When that deadline wins, the reserved connection is discarded and the pool slot returns.
 
 ## [0.60.102.0] - 2026-10-07
 
