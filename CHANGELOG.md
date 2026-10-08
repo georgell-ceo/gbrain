@@ -48,6 +48,7 @@ For one hosted replica on a transaction pooler, use port 6543 as the database UR
 - A remote `remove_link` without `link_source` is refused (`invalid_params`). Local `gbrain unlink` may still omit `--link-source`; it deletes every link source for that pair and prints a warning. `add_link` still defaults an omitted provenance to `manual`. Derived-link, mention and effect-link deletes do not go through this check.
 - `get_links` takes an optional `link_source` and returns only that provenance. Leaving it out keeps the current list. No migration.
 - The phrase-creator schema pack extends the creator lens with `depends_on` and `owned_by`, declared by name only. Turn it on with `gbrain schema use phrase-creator`.
+- A rejected `POST /mcp` bearer check writes one warning with the reason, method, path, user agent (120 characters) and the first `X-Forwarded-For` hop. `client_id` is included only when verification already resolved it. The line never contains the token, a prefix, a hash or the Authorization header. The same reason, address and user agent is logged at most once a minute, and the next line says how many were suppressed.
 
 ## [0.60.102.0] - 2026-10-07
 

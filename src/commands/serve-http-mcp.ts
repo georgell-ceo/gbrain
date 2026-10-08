@@ -45,6 +45,7 @@ import { serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
 import { withBearerScopeHint } from './serve-http-oauth.ts';
+import { withMcpAuthRejectLog } from './serve-http-auth-reject.ts';
 import type { ServeHttpContext } from './serve-http.ts';
 import { readHostedHttpGuards } from '../core/http-hosted-guards.ts';
 
@@ -121,7 +122,8 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
   // the hinted scope and never step up (claude.ai connectors) otherwise stay
   // read-only; grantScopes still caps each grant to the client row's scope.
   app.post('/mcp', withBearerScopeHint(
-    requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read', 'write'],
+    withMcpAuthRejectLog(requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl })),
+    ['read', 'write'],
   ), async (req: Request, res: Response) => {
     const guards = readHostedHttpGuards(ctx);
     const slot = guards ? await guards.gate.acquire() : { ok: true as const, release: () => {} };

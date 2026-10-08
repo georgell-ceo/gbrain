@@ -522,7 +522,7 @@
     },
     {
       "handlers": [
-        "withBearerScopeHint(requireBearerAuth({ verifier : resourceVerifier , resourceMetadataUrl }), [ 'read' , 'write' ])",
+        "withBearerScopeHint(withMcpAuthRejectLog(requireBearerAuth({ verifier : resourceVerifier , resourceMetadataUrl })), [ 'read' , 'write' ])",
         "<inline>"
       ],
       "method": "post",

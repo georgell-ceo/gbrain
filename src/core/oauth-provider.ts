@@ -27,6 +27,7 @@ import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/serv
 import type { AuthInfo as SdkAuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { InvalidTokenError, InvalidClientMetadataError, InvalidClientError, InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { hashToken, generateToken, isUndefinedColumnError } from './utils.ts';
+import { rememberAuthRejectClient } from './mcp-auth-reject-log.ts';
 import {
   hasScope,
   assertAllowedScopes,
@@ -780,7 +781,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     }
 
     if (oauthRows.length > 0) {
-      const row = oauthRows[0];
+      const row = oauthRows[0]; rememberAuthRejectClient(row.client_id);
       const currentGrant = row.current_grant && typeof row.current_grant === 'object' ? row.current_grant as Record<string, unknown> : {};
       for (const field of ['allowed_operations', 'grant_revision', 'grant_profile', 'grant_repair_reasons', 'bound_tools', 'bound_source_id', 'bound_brain_id', 'delegated_slug_prefixes', 'delegated_namespace', 'bound_max_concurrent', 'budget_usd_per_day']) row[field] = currentGrant[field];
       row.client_deleted_at = currentGrant.deleted_at;
@@ -923,7 +924,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         WHERE id IN (SELECT id FROM access_tokens WHERE token_hash = ${tokenHash}
           AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds') FOR UPDATE SKIP LOCKED)
       `.catch(() => { /* fire-and-forget */ });
-      const name = legacyRows[0].name as string;
+      const name = legacyRows[0].name as string; rememberAuthRejectClient(name);
       // One grant shape (grants/model.ts), shared with the legacy HTTP
       // transport so the two cannot drift. Unified rows read the columns,
       // fail-closed on drift; a row still on the legacy shape is converted on
