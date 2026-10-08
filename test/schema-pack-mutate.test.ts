@@ -107,7 +107,8 @@ describe('locateMutablePackFile — bundled guard', () => {
     // investor, engineer, everything) are read-only too.
     expect(BUNDLED_PACK_NAMES.has('gbrain-investor')).toBe(true);
     expect(BUNDLED_PACK_NAMES.has('company-brain')).toBe(true);
-    expect(BUNDLED_PACK_NAMES.size).toBe(8);
+    expect(BUNDLED_PACK_NAMES.has('phrase-creator')).toBe(true);
+    expect(BUNDLED_PACK_NAMES.size).toBe(9);
   });
 
   it('rejects gbrain-base-v2 with PACK_READONLY (bundled guard)', () => {

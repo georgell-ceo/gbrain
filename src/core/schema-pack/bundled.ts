@@ -16,6 +16,7 @@ export const BUNDLED_PACK_NAMES = [
   'gbrain-everything',
   'gbrain-base-v2',
   'company-brain',
+  'phrase-creator',
 ] as const;
 
 export type BundledPackName = typeof BUNDLED_PACK_NAMES[number];

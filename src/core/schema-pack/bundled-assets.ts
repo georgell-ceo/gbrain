@@ -39,6 +39,7 @@ import P_EVERYTHING from './base/gbrain-everything.yaml' with { type: 'file' };
 // @ts-ignore
 import P_BASE_V2 from './base/gbrain-base-v2.yaml' with { type: 'file' };
 import P_COMPANY_BRAIN from './base/company-brain.yaml' with { type: 'file' };
+import P_PHRASE_CREATOR from './base/phrase-creator.yaml' with { type: 'file' };
 
 const BUNDLED_PACK_ASSETS: Record<BundledPackName, string> = {
   'gbrain-base': P_BASE as unknown as string,
@@ -49,6 +50,7 @@ const BUNDLED_PACK_ASSETS: Record<BundledPackName, string> = {
   'gbrain-everything': P_EVERYTHING as unknown as string,
   'gbrain-base-v2': P_BASE_V2 as unknown as string,
   'company-brain': P_COMPANY_BRAIN as unknown as string,
+  'phrase-creator': P_PHRASE_CREATOR as unknown as string,
 };
 
 /**
