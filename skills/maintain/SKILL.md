@@ -551,8 +551,8 @@ The maintenance report follows this structure:
 - List pages in gbrain with filters (list_pages)
 - Read a page from gbrain (get_page)
 - Check backlinks in gbrain (get_backlinks)
-- Link entities in gbrain (add_link)
-- Remove links in gbrain (remove_link)
+- Link entities in gbrain (add_link). Pass link_source (your own tag) when you own the edge; otherwise it stays manual.
+- Remove links in gbrain (remove_link). Always pass link_source (your own tag).
 - Tag a page in gbrain (add_tag)
 - Remove a tag in gbrain (remove_tag)
 - View timeline in gbrain (get_timeline)

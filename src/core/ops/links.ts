@@ -176,22 +176,45 @@ const add_link: Operation = {
   cliHints: { name: 'link', aliases: ['link-add'], positional: ['from', 'to'] },
 };
 
+/** Caller-supplied provenance. Blank or non-string counts as omitted. */
+function explicitLinkSource(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 const remove_link: Operation = {
   name: 'remove_link',
   idempotent: false,
   outputRedaction: 'no_stored_text',
-  description: 'Remove a link between two pages (optionally only one link_type or link_source). Use when a relationship was recorded wrongly. Needs write scope. On page_not_found: resolve both slugs with resolve_slugs.',
+  description: 'Remove a link between two pages. A remote caller must pass link_source. Use when a relationship was recorded wrongly. Needs write scope. On page_not_found: resolve both slugs with resolve_slugs.',
   params: {
     from: { type: 'string', required: true, description: 'Slug of the page the link originates from (same endpoint order as add_link).' },
     to: { type: 'string', required: true, description: 'Slug of the page the link points to.' },
     link_type: { type: 'string', description: 'Only remove edges of this link type (omit = all types)' },
-    link_source: { type: 'string', description: 'Only remove edges of this provenance (e.g. citation-graph); omit = any provenance' },
+    link_source: { type: 'string', description: 'Provenance to remove (e.g. citation-graph). Required for a remote caller. The local CLI may omit it and then deletes every link source.' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     enforceClientSlugFence(ctx, p.from as string, 'remove_link');
+    const linkSource = explicitLinkSource(p.link_source);
+    // Anything that is not a trusted local CLI (OAuth, static token, stdio MCP)
+    // must name the provenance. Engine-internal deletes (derived links, mentions,
+    // effect links) call engine.removeLink and never enter this handler.
+    if (ctx.remote !== false && linkSource === undefined) {
+      throw opError(
+        'invalid_params',
+        'remove_link: pass link_source. A remote caller must name the provenance to delete.',
+        `Pass ${paramUse(ctx, 'link_source', 'manual')} so only that provenance is removed.`,
+      );
+    }
     if (ctx.dryRun) return { dry_run: true, action: 'remove_link', from: p.from, to: p.to };
+    if (linkSource === undefined) {
+      ctx.logger.warn(
+        '[gbrain] unlink without --link-source will delete rows from every link source for this pair. Pass --link-source <tag> to remove one provenance only.',
+      );
+    }
     await primeRelationSemantics(ctx.engine);
     const linkOpts = ctx.sourceId
       ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId }
@@ -200,11 +223,11 @@ const remove_link: Operation = {
       const removed = await engine.removeLink(
         p.from as string, p.to as string,
         (p.link_type as string) || undefined,
-        (p.link_source as string) || undefined,
+        linkSource,
         opts,
       );
       // Manual dated statements belong to manual edges; drop them with the edge.
-      if (removed > 0 && (!p.link_source || p.link_source === 'manual')) {
+      if (removed > 0 && (linkSource === undefined || linkSource === 'manual')) {
         await removeManualTransitions(engine, { from: p.from as string, to: p.to as string, linkType: (p.link_type as string) || undefined, sourceId: opts?.fromSourceId ?? 'default' });
       }
       return removed;

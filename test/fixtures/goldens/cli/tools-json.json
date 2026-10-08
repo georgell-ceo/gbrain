@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 207549,
-    "stdoutSha256": "ba03674e7846f4d445030acf6a2bb53cd5544abdff7f8d28e480903f1e852586",
+    "stdoutBytes": 207595,
+    "stdoutSha256": "8e6870ce608784d21d2b3c8e845ca5e2aac89f8d62401e77a9a0611ec998ac52",
     "toolNames": [
       "remember",
       "entity",
@@ -1665,7 +1665,7 @@
         "scope": "write"
       },
       {
-        "description": "Remove a link between two pages (optionally only one link_type or link_source). Use when a relationship was recorded wrongly. Needs write scope. On page_not_found: resolve both slugs with resolve_slugs.",
+        "description": "Remove a link between two pages. A remote caller must pass link_source. Use when a relationship was recorded wrongly. Needs write scope. On page_not_found: resolve both slugs with resolve_slugs.",
         "idempotent": false,
         "local_only": false,
         "mutating": true,
@@ -1684,7 +1684,7 @@
               "type": "string"
             },
             "link_source": {
-              "description": "Only remove edges of this provenance (e.g. citation-graph); omit = any provenance",
+              "description": "Provenance to remove (e.g. citation-graph). Required for a remote caller. The local CLI may omit it and then deletes every link source.",
               "type": "string"
             },
             "link_type": {

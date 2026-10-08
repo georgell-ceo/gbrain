@@ -115,7 +115,7 @@ Every non-localOnly operation on the MCP surface: 140 tools across 23 areas. **S
 | `get_backlinks` | Links to a page; group:"page" pages by referrer, newest first. | read | yes |  |
 | `get_links` | List a page's outgoing links (typed edges to other pages). | read |  |  |
 | `list_link_sources` | Link provenances in the brain (e.g. | read | yes |  |
-| `remove_link` | Remove a link between two pages (optionally only one link_type or link_source). | write |  |  |
+| `remove_link` | Remove a link between two pages. | write |  |  |
 | `traverse_graph` | Walk the link graph from a page. | read | yes |  |
 | `wanted_pages` | Link targets that have no page yet, most-referenced first: each was written as a link but its page does not exist, so no edge exists. | read |  |  |
 
