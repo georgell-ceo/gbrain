@@ -95,7 +95,7 @@ describe('remove_link link_source for remote callers', () => {
     expect(result).toMatchObject({ status: 'ok', removed: 2 });
     expect(await sources('rmt-local', 'rmt-local-b')).toEqual([]);
     expect(ctx.warns).toEqual([
-      '[gbrain] unlink without --link-source will delete rows from every link source for this pair. Pass --link-source <tag> to remove one provenance only.',
+      '[gbrain] unlink without a link source tag will delete rows from every link source for this pair. Pass a link source tag to remove one provenance only.',
     ]);
   });
 

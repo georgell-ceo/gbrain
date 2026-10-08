@@ -211,9 +211,11 @@ const remove_link: Operation = {
     }
     if (ctx.dryRun) return { dry_run: true, action: 'remove_link', from: p.from, to: p.to };
     if (linkSource === undefined) {
-      ctx.logger.warn(
-        '[gbrain] unlink without --link-source will delete rows from every link source for this pair. Pass --link-source <tag> to remove one provenance only.',
-      );
+      // No dashed flag token here: the flag-registry scanner treats `--word`
+      // in this module as a legal flag for every command that walks the ops
+      // façade. The unlink help text already documents the flag.
+      const warn = ctx.logger?.warn ?? console.warn;
+      warn.call(ctx.logger, '[gbrain] unlink without a link source tag will delete rows from every link source for this pair. Pass a link source tag to remove one provenance only.');
     }
     await primeRelationSemantics(ctx.engine);
     const linkOpts = ctx.sourceId
