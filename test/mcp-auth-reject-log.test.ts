@@ -4,11 +4,13 @@ import { InvalidTokenError, InsufficientScopeError } from '@modelcontextprotocol
 import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import { hashToken } from '../src/core/utils.ts';
 import {
+  AUTH_REJECT_BUCKET_CAP,
+  AUTH_REJECT_STALE_WINDOWS,
   AUTH_REJECT_WINDOW_MS,
+  authRejectClientIp,
   authRejectLogLine,
   authRejectRateKey,
   authRejectReason,
-  authRejectSourceIp,
   createAuthRejectLimiter,
   rememberAuthRejectClient,
   runWithAuthRejectHint,
@@ -34,22 +36,78 @@ describe('auth reject reason and fields', () => {
     expect(authRejectReason({ error: 'invalid_token', error_description: `Invalid token ${SECRET}` })).toBe('invalid_token');
   });
 
-  test('truncates the user agent and keeps the first forwarded hop', () => {
+  test('truncates the user agent and uses the trusted address, not a forwarded hop', () => {
     expect(truncateUserAgent('a'.repeat(150))).toHaveLength(120);
     expect(truncateUserAgent('line\r\none')).toBe('line one');
-    expect(authRejectSourceIp('203.0.113.9, 10.0.0.8', '127.0.0.1')).toBe('203.0.113.9');
-    expect(authRejectSourceIp(undefined, '192.0.2.4')).toBe('192.0.2.4');
-    expect(authRejectSourceIp('', undefined)).toBe('unknown');
+    expect(truncateUserAgent('a\u2028b\u2029c\u0085d')).toBe('a b c d');
+    expect(authRejectClientIp('192.0.2.10', '127.0.0.1')).toBe('192.0.2.10');
+    expect(authRejectClientIp(undefined, '192.0.2.4')).toBe('192.0.2.4');
+    expect(authRejectClientIp('', undefined)).toBe('unknown');
+    expect(authRejectClientIp('192.0.2.10', '203.0.113.9')).not.toBe('203.0.113.9');
   });
 
   test('emits at most one line a minute and reports the suppressed count', () => {
     const limiter = createAuthRejectLimiter();
     const key = authRejectRateKey('invalid_token', '203.0.113.9', 'retry-bot');
-    expect(limiter.decide(key, 0)).toEqual({ emit: true, suppressed: 0 });
-    expect(limiter.decide(key, 1_000)).toEqual({ emit: false, suppressed: 1 });
-    expect(limiter.decide(key, 30_000)).toEqual({ emit: false, suppressed: 2 });
-    expect(limiter.decide(key, AUTH_REJECT_WINDOW_MS)).toEqual({ emit: true, suppressed: 2 });
-    expect(limiter.decide(key, AUTH_REJECT_WINDOW_MS + 1)).toEqual({ emit: false, suppressed: 1 });
+    const quiet = { globalSuppressed: 0 };
+    expect(limiter.decide(key, 0)).toEqual({ emit: true, suppressed: 0, ...quiet });
+    expect(limiter.decide(key, 1_000)).toEqual({ emit: false, suppressed: 1, ...quiet });
+    expect(limiter.decide(key, 30_000)).toEqual({ emit: false, suppressed: 2, ...quiet });
+    expect(limiter.decide(key, AUTH_REJECT_WINDOW_MS)).toEqual({ emit: true, suppressed: 2, ...quiet });
+    expect(limiter.decide(key, AUTH_REJECT_WINDOW_MS + 1)).toEqual({ emit: false, suppressed: 1, ...quiet });
+  });
+
+  test('stays at the bucket cap for a flood of fresh unique keys', () => {
+    const limiter = createAuthRejectLimiter(AUTH_REJECT_WINDOW_MS, { globalLinesPerWindow: 100_000 });
+    let max = 0;
+    for (let i = 0; i < 10_000; i++) {
+      limiter.decide(`k${i}`, 1_000);
+      const size = limiter.size();
+      if (size > max) max = size;
+      expect(size).toBeLessThanOrEqual(AUTH_REJECT_BUCKET_CAP);
+    }
+    expect(max).toBe(AUTH_REJECT_BUCKET_CAP);
+    expect(limiter.size()).toBe(AUTH_REJECT_BUCKET_CAP);
+  });
+
+  test('the stale sweep does not run on every reject', () => {
+    const sweepIntervalMs = 30 * AUTH_REJECT_WINDOW_MS;
+    const limiter = createAuthRejectLimiter(AUTH_REJECT_WINDOW_MS, {
+      sweepIntervalMs,
+      globalLinesPerWindow: 100_000,
+    });
+    for (let i = 0; i < 50; i++) limiter.decide(`s${i}`, 0);
+    expect(limiter.size()).toBe(50);
+    const staleAt = AUTH_REJECT_WINDOW_MS * AUTH_REJECT_STALE_WINDOWS + 1;
+    expect(staleAt).toBeLessThan(sweepIntervalMs);
+    limiter.decide('fresh', staleAt);
+    expect(limiter.size()).toBe(51);
+    limiter.decide('later', sweepIntervalMs);
+    expect(limiter.size()).toBe(1);
+  });
+
+  test('a global line ceiling folds overflow into the next emitted line', () => {
+    const limiter = createAuthRejectLimiter(AUTH_REJECT_WINDOW_MS, { globalLinesPerWindow: 3, cap: 100 });
+    const first = [];
+    for (let i = 0; i < 10; i++) first.push(limiter.decide(`g${i}`, 0));
+    expect(first.filter((d) => d.emit)).toHaveLength(3);
+    expect(first.filter((d) => !d.emit)).toHaveLength(7);
+    expect(limiter.size()).toBe(10);
+    const next = limiter.decide('g-next', AUTH_REJECT_WINDOW_MS);
+    expect(next).toEqual({ emit: true, suppressed: 0, globalSuppressed: 7 });
+  });
+
+  test('an evicted bucket does not throw or attach its count to another key', () => {
+    const limiter = createAuthRejectLimiter(AUTH_REJECT_WINDOW_MS, { cap: 2, globalLinesPerWindow: 100 });
+    expect(limiter.decide('a', 0).emit).toBe(true);
+    expect(limiter.decide('a', 1)).toEqual({ emit: false, suppressed: 1, globalSuppressed: 0 });
+    expect(limiter.decide('a', 2)).toEqual({ emit: false, suppressed: 2, globalSuppressed: 0 });
+    expect(limiter.decide('b', 0).suppressed).toBe(0);
+    const evict = limiter.decide('c', 0);
+    expect(evict).toEqual({ emit: true, suppressed: 0, globalSuppressed: 2 });
+    expect(limiter.size()).toBe(2);
+    expect(limiter.decide('a', 3)).toEqual({ emit: true, suppressed: 0, globalSuppressed: 0 });
+    expect(limiter.decide('c', 1)).toEqual({ emit: false, suppressed: 1, globalSuppressed: 0 });
   });
 
   test('the log line omits client_id until one was resolved', () => {
@@ -63,7 +121,7 @@ describe('HTTP MCP bearer rejection log', () => {
   function invoke(
     authorization: string | undefined,
     verifier: OAuthTokenVerifier,
-    opts: { now?: () => number; requiredScopes?: string[]; userAgent?: string; forwardedFor?: string } = {},
+    opts: { now?: () => number; requiredScopes?: string[]; userAgent?: string; forwardedFor?: string; ip?: string; path?: string } = {},
   ): Promise<{ status: number; lines: string[] }> {
     const lines: string[] = [];
     const middleware = withMcpAuthRejectLog(
@@ -77,9 +135,9 @@ describe('HTTP MCP bearer rejection log', () => {
     if (authorization !== undefined) headers.authorization = authorization;
     const req = {
       method: 'POST',
-      path: '/mcp',
-      url: '/mcp',
-      ip: '127.0.0.1',
+      path: opts.path ?? '/mcp',
+      url: opts.path ?? '/mcp',
+      ip: opts.ip ?? '192.0.2.10',
       socket: { remoteAddress: '127.0.0.1' },
       headers,
     };
@@ -115,9 +173,10 @@ describe('HTTP MCP bearer rejection log', () => {
       method: 'POST',
       path: '/mcp',
       user_agent: 'phrase-retry/1',
-      ip: '203.0.113.9',
+      ip: '192.0.2.10',
       suppressed: 0,
     });
+    expect(lines[0]).not.toContain('203.0.113.9');
     expect(lines[0]).not.toContain('authorization');
     expect(lines[0]).not.toContain('Authorization');
   });
@@ -142,6 +201,8 @@ describe('HTTP MCP bearer rejection log', () => {
     expect(line).not.toContain('Bearer');
     expect(line).not.toContain('Authorization');
     expect(line).not.toContain('authorization');
+    expect(line).not.toContain('203.0.113.9');
+    expect(payload.ip).toBe('192.0.2.10');
   });
 
   test('includes client_id only after verification resolved it', async () => {
@@ -173,19 +234,22 @@ describe('HTTP MCP bearer rejection log', () => {
   test('a retry storm logs once a minute with the suppressed count', async () => {
     clock = 1_000;
     const verifier = { async verifyAccessToken() { throw new InvalidTokenError('Invalid token'); } };
-    const first = await invoke('Bearer one', verifier, { now: () => clock, userAgent: 'storm/2', forwardedFor: '198.51.100.7' });
+    const storm = { now: () => clock, userAgent: 'storm/2', ip: '198.51.100.7' };
+    const first = await invoke('Bearer one', verifier, { ...storm, forwardedFor: '203.0.113.50' });
     clock = 2_000;
-    const second = await invoke('Bearer two', verifier, { now: () => clock, userAgent: 'storm/2', forwardedFor: '198.51.100.7' });
+    const second = await invoke('Bearer two', verifier, { ...storm, forwardedFor: '203.0.113.51' });
     clock = 3_000;
-    const third = await invoke('Bearer three', verifier, { now: () => clock, userAgent: 'storm/2', forwardedFor: '198.51.100.7' });
+    const third = await invoke('Bearer three', verifier, { ...storm, forwardedFor: '203.0.113.52' });
     expect(first.lines).toHaveLength(1);
     expect(JSON.parse(first.lines[0]!.replace('[mcp-auth] reject ', '')).suppressed).toBe(0);
     expect(second.lines).toHaveLength(0);
     expect(third.lines).toHaveLength(0);
     clock = 1_000 + AUTH_REJECT_WINDOW_MS;
-    const later = await invoke('Bearer four', verifier, { now: () => clock, userAgent: 'storm/2', forwardedFor: '198.51.100.7' });
+    const later = await invoke('Bearer four', verifier, { ...storm, forwardedFor: '203.0.113.53' });
     expect(later.lines).toHaveLength(1);
     expect(JSON.parse(later.lines[0]!.replace('[mcp-auth] reject ', '')).suppressed).toBe(2);
+    expect(JSON.parse(later.lines[0]!.replace('[mcp-auth] reject ', '')).ip).toBe('198.51.100.7');
+    expect(later.lines[0]).not.toContain('203.0.113');
     for (const token of ['one', 'two', 'three', 'four']) {
       expect(later.lines[0]).not.toContain(token);
     }
@@ -200,6 +264,16 @@ describe('HTTP MCP bearer rejection log', () => {
     const { status, lines } = await invoke(`Bearer ${SECRET}`, verifier);
     expect(status).toBe(200);
     expect(lines).toEqual([]);
+  });
+
+  test('line separators in the path do not reach the log', async () => {
+    const verifier = { async verifyAccessToken() { throw new InvalidTokenError('Invalid token'); } };
+    const { lines } = await invoke(undefined, verifier, { path: '/mcp\u2028\u0085next', userAgent: 'path\u2029probe' });
+    expect(lines[0]).not.toContain('\u2028');
+    expect(lines[0]).not.toContain('\u2029');
+    expect(lines[0]).not.toContain('\u0085');
+    expect(JSON.parse(lines[0]!.replace('[mcp-auth] reject ', '')).path).toBe('/mcpnext');
+    expect(JSON.parse(lines[0]!.replace('[mcp-auth] reject ', '')).user_agent).toBe('path probe');
   });
 
   test('user agent is truncated to 120 characters', async () => {

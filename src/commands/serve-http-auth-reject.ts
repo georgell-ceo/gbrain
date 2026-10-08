@@ -1,9 +1,9 @@
 import type { Request, RequestHandler, Response } from 'express';
 import {
+  authRejectClientIp,
   authRejectLogLine,
   authRejectRateKey,
   authRejectReason,
-  authRejectSourceIp,
   createAuthRejectLimiter,
   currentAuthRejectClient,
   runWithAuthRejectHint,
@@ -21,8 +21,9 @@ export interface McpAuthRejectLogOptions {
 
 /**
  * Wrap the MCP bearer middleware. A 401 or 403 from that middleware writes
- * at most one warning a minute per reason, source address and user agent.
- * Logging never reads the Authorization header.
+ * at most one warning a minute per reason, trusted address and user agent,
+ * and a global line ceiling across every key. Logging never reads the Authorization header or
+ * X-Forwarded-For. The address is Express `req.ip`.
  */
 export function withMcpAuthRejectLog(middleware: RequestHandler, options: McpAuthRejectLogOptions = {}): RequestHandler {
   const now = options.now ?? Date.now;
@@ -72,7 +73,7 @@ function writeAuthReject(
   const method = cleanMethod(req.method);
   const path = cleanPath(req.path || req.url || '/');
   const userAgent = truncateUserAgent(req.headers['user-agent']);
-  const ip = authRejectSourceIp(req.headers['x-forwarded-for'], req.ip || req.socket?.remoteAddress);
+  const ip = authRejectClientIp(req.ip, req.socket?.remoteAddress);
   const decision = limiter.decide(authRejectRateKey(reason, ip, userAgent), now);
   if (!decision.emit) return;
   warn(authRejectLogLine({
@@ -83,6 +84,7 @@ function writeAuthReject(
     ip,
     clientId: currentAuthRejectClient(),
     suppressed: decision.suppressed,
+    globalSuppressed: decision.globalSuppressed,
   }));
 }
 
@@ -93,6 +95,6 @@ function cleanMethod(method: string | undefined): string {
 
 function cleanPath(path: string): string {
   const pathname = path.split('?')[0]?.split('#')[0] ?? '/';
-  const cleaned = pathname.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  const cleaned = pathname.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '').trim();
   return (cleaned.length > 200 ? cleaned.slice(0, 200) : cleaned) || '/';
 }
