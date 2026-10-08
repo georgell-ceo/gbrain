@@ -4,6 +4,7 @@ import { AbandonedError, settleOrAbandon } from '../src/core/persistence/settle-
 
 describe('persistence consumer wiring', () => {
   test('statement-timeout follow-up and renewal waits are hard-capped', () => {
+    // test-reads-source-ok[structural]: pins the two settleOrAbandon call sites in the consumer. The deadline behaviour is covered by the runtime tests.
     const src = readFileSync(new URL('../src/core/persistence/consumer.ts', import.meta.url), 'utf8');
     expect(src).toContain('settleOrAbandon(followUp()');
     expect(src).toContain('settleOrAbandon(renewing');
