@@ -1,7 +1,9 @@
 /**
- * An unreadable embedding-settings or catalog read is retried once, then
- * fails as facts_embedding_unreadable. A read that returns concrete values
- * that differ keeps embedding_configuration, with no retry.
+ * An errored, cancelled, or null-shaped embedding read is retried once,
+ * then fails as facts_embedding_unreadable. A thrown error inside the
+ * locked transaction is not retried. A catalog query that reports the
+ * vector column missing on both passes keeps embedding_configuration.
+ * A read that returns concrete values that differ is not retried.
  */
 import { expect, test } from 'bun:test';
 import type { GBrainConfig } from '../src/core/config.ts';
@@ -92,13 +94,26 @@ test('an empty settings read is retried once and then admits', async () => {
   expect(warns.some(line => line.includes('unreadable config') && line.includes('config query returned no rows'))).toBe(true);
 });
 
-test('a cancelled settings read is retried once on the same handle and then admits', async () => {
+test('a cancelled settings read outside a transaction is retried once and then admits', async () => {
   const engine = scriptedEngine((kind, n) => kind === 'config' && n === 1
     ? { error: pgError('canceling statement due to user request', '57014') }
     : column('halfvec(1024)')(kind));
-  await assertManagedFactsEmbedding(engine as unknown as BrainEngine, CONFIG, VOYAGE, true);
+  await assertManagedFactsEmbedding(engine as unknown as BrainEngine, CONFIG, VOYAGE);
   expect(engine.calls.filter(kind => kind === 'config')).toHaveLength(2);
-  expect(engine.sqls.filter(sql => sql.includes('FROM config')).every(sql => sql.includes('FOR SHARE'))).toBe(true);
+  expect(engine.sqls.filter(sql => sql.includes('FROM config')).every(sql => sql.includes('FOR SHARE'))).toBe(false);
+});
+
+test('a cancelled settings read inside the locked transaction raises the transient error with no retry', async () => {
+  const engine = scriptedEngine(() => ({ error: pgError('canceling statement due to user request', '57014') }));
+  const started = Date.now();
+  const error = await catchError(() => assertManagedFactsEmbedding(engine as unknown as BrainEngine, CONFIG, VOYAGE, true)) as OperationError;
+  expect(Date.now() - started).toBeLessThan(200);
+  expect(error).toBeInstanceOf(OperationError);
+  expect(error.code).toBe('facts_embedding_unreadable');
+  expect(error.code).not.toBe('embedding_configuration');
+  expect(error.message).toContain('Try again later');
+  expect(engine.calls).toEqual(['config']);
+  expect(engine.sqls[0]).toContain('FOR SHARE');
 });
 
 test('a missing facts vector column is retried once and then admits', async () => {
@@ -152,15 +167,33 @@ test('two cancelled reads fail as a transient error and log the underlying error
   expect(logged.join('\n')).not.toContain('embedding_configuration');
 });
 
-test('two unreadable catalog reads fail as a transient error, not a provenance mismatch', async () => {
+test('a catalog that reports the vector column missing on both passes is a provenance mismatch', async () => {
   const engine = scriptedEngine(kind => kind === 'config' ? { rows: GOOD_CONFIG } : { rows: [{ exists: false }] });
+  const { value, warns } = await withWarns(async () => catchError(() => assertManagedFactsEmbedding(engine as unknown as BrainEngine, CONFIG, VOYAGE)));
+  const error = value as OperationError;
+  expect(error).toBeInstanceOf(OperationError);
+  expect(error.code).toBe('embedding_configuration');
+  expect(error.message).toContain('provenance does not match');
+  expect(error.code).not.toBe('facts_embedding_unreadable');
+  expect(engine.calls.filter(kind => kind === 'config')).toHaveLength(2);
+  expect(engine.calls.filter(kind => kind === 'catalog-exists')).toHaveLength(2);
+  expect(engine.calls).not.toContain('catalog-type');
+  expect(warns.some(line => line.includes('mismatch catalog') && line.includes('missing'))).toBe(true);
+  expect(warns.some(line => line.includes('unreadable'))).toBe(false);
+});
+
+test('a null catalog shape stays unreadable and fails as a transient error', async () => {
+  const engine = scriptedEngine(kind => {
+    if (kind === 'config') return { rows: GOOD_CONFIG };
+    if (kind === 'catalog-exists') return { rows: [{ exists: true }] };
+    return { rows: [{ formatted: null }] };
+  });
   const error = await catchError(() => assertManagedFactsEmbedding(engine as unknown as BrainEngine, CONFIG, VOYAGE)) as OperationError;
   expect(error).toBeInstanceOf(OperationError);
   expect(error.code).toBe('facts_embedding_unreadable');
   expect(error.message).not.toContain('provenance does not match');
-  expect(engine.calls.filter(kind => kind === 'config')).toHaveLength(2);
   expect(engine.calls.filter(kind => kind === 'catalog-exists')).toHaveLength(2);
-  expect(engine.calls).not.toContain('catalog-type');
+  expect(engine.calls.filter(kind => kind === 'catalog-type')).toHaveLength(2);
 });
 
 test('a real width mismatch stays embedding_configuration and is not retried', async () => {
