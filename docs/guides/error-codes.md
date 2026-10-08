@@ -885,6 +885,16 @@ More: [docs/guides/facts-drain.md#deferrals](../../docs/guides/facts-drain.md#de
 
 More: [docs/guides/facts-drain.md#deferrals](../../docs/guides/facts-drain.md#deferrals)
 
+### facts_embedding_unreadable
+
+<a id="facts_embedding_unreadable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain's embedding settings could not be read just now, so no facts were admitted. | An empty, cancelled, or timed-out read of the embedding settings or the facts vector column is not a configuration change. The same extraction can succeed on a later attempt. | Run the extraction again. The same request_id is safe: nothing was admitted. | agent | `repeat the read that failed` | 1 | yes |
+
+Reasons: `config`, `catalog`.
+
 ### facts_payload_expired
 
 <a id="facts_payload_expired"></a>
