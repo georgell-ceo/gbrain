@@ -24,6 +24,7 @@ import { maintenancePublishWaitMs } from './maintenance-wait.ts';
 import { digest, requireUuid, sha256 } from './digest.ts';
 import { isTerminal, type WriteAuthority, type WriteRequest } from './model.ts';
 import type { WriteReceipt } from './types.ts';
+import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 
 export interface ManagedFactsResult {
   inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; write_requests: WriteReceipt[];
@@ -89,38 +90,180 @@ async function validateManagedFactsCompletion(engine: BrainEngine, session: Mana
     { fix: receiptFix(prior.request_id) });
 }
 
-export async function resolveManagedFactsEmbedding(engine: BrainEngine, config: GBrainConfig,
-  lock = false): Promise<FactEmbeddingSignature | null> {
-  const rows = await engine.executeRaw<{ key: string; value: string }>(`SELECT key,value FROM config
+/** Pause before the single retry of an unreadable embedding read. Not configurable. */
+const FACTS_EMBEDDING_READ_RETRY_MS = 250;
+
+interface FactsEmbeddingUnreadableRead {
+  read: 'config' | 'catalog';
+  message: string;
+  sqlstate?: string;
+  /** Thrown by the query. Inside a lock this aborts the transaction. */
+  queryError?: boolean;
+}
+
+type FactsEmbeddingRead =
+  | { ok: true; signature: FactEmbeddingSignature | null }
+  | { ok: false; kind: 'unreadable'; failure: FactsEmbeddingUnreadableRead }
+  | { ok: false; kind: 'missing_column'; model: string; dimensions: number };
+
+function factsEmbeddingSqlState(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
+}
+
+/** Drop connection URLs and credential assignments before anything is logged. */
+function scrubFactsEmbeddingLog(text: string): string {
+  return text
+    .replace(/postgres(?:ql)?:\/\/\S+/gi, '[redacted-url]')
+    .replace(/\b(password|secret|api[_-]?key)\s*[=:]\s*\S+/gi, '$1=[redacted]');
+}
+
+function logFactsEmbeddingRead(kind: 'unreadable' | 'mismatch', read: string, message: string, sqlstate?: string): void {
+  const state = sqlstate ? ` SQLSTATE ${sqlstate}` : '';
+  console.warn(`[facts-embedding] ${kind} ${read}:${state} ${scrubFactsEmbeddingLog(message)}`);
+}
+
+/**
+ * A read that did not return concrete settings: cancellation, statement
+ * timeout, a dropped connection, or an aborted transaction. Other errors
+ * propagate so a real fault is not reported as a transient miss.
+ */
+function isFactsEmbeddingQueryUnreadable(err: unknown): boolean {
+  if (isStatementTimeoutError(err) || isRetryableConnError(err)) return true;
+  const state = factsEmbeddingSqlState(err);
+  if (state === '25P02' || state === '57014' || state === '57P01' || state === '57P02' || state === '57P03') return true;
+  if (err instanceof Error && (err.name === 'AbortError' || err.name === 'AbandonedError')) return true;
+  if (err && typeof err === 'object' && (err as { abandoned?: unknown }).abandoned === true) return true;
+  const message = err instanceof Error ? err.message : '';
+  return /cancel(?:ing|led|lation)|abandoned after|current transaction is aborted|transaction is aborted/i.test(message);
+}
+
+function unreadableFromError(read: 'config' | 'catalog', err: unknown): FactsEmbeddingUnreadableRead {
+  const message = err instanceof Error ? err.message : String(err);
+  const sqlstate = factsEmbeddingSqlState(err);
+  return { read, message, queryError: true, ...(sqlstate ? { sqlstate } : {}) };
+}
+
+function factsEmbeddingProvenanceError(model: string, dimensions: number, shape: { exists: boolean; dims: number | null }): OperationError {
+  return opError('embedding_configuration', 'The selected brain facts embedding provenance does not match its vector column.',
+    `The facts vector column ${shape.exists ? `holds ${shape.dims ?? 'unknown'}-dimension vectors` : 'is missing'}, but ${model} is configured for ${dimensions}, so fact extraction stopped before admission. Check embedding readiness and show the user the mismatch.`,
+    { fix: embeddingsFix() });
+}
+
+function factsEmbeddingUnreadableError(failure: FactsEmbeddingUnreadableRead): OperationError {
+  const state = failure.sqlstate ? ` (SQLSTATE ${failure.sqlstate})` : '';
+  return opError(
+    'facts_embedding_unreadable',
+    'Could not read the brain\'s embedding settings just now, so nothing was admitted. Try again later; the same request_id is safe.',
+    'The embedding settings or the facts vector column could not be read just now, so nothing was admitted. Run the extraction again; the same request_id is safe.',
+    { fix: embeddingsFix(), reason: failure.read, detail: scrubFactsEmbeddingLog(`${failure.read}: ${failure.message}${state}`) },
+  );
+}
+
+function pauseFactsEmbeddingRetry(): Promise<void> {
+  return new Promise(resolve => { setTimeout(resolve, FACTS_EMBEDDING_READ_RETRY_MS); });
+}
+
+/**
+ * One pass over the config rows and, when a model is configured, the facts
+ * vector column. An errored, cancelled, or null-shaped read is unreadable.
+ * A catalog query that succeeds and reports the column missing is a
+ * definitive empty result, not an unreadable read. Concrete values that
+ * disagree throw embedding_configuration and are not retried.
+ */
+async function readManagedFactsEmbeddingOnce(engine: BrainEngine, config: GBrainConfig, lock: boolean,
+  expected: FactEmbeddingSignature | null | undefined): Promise<FactsEmbeddingRead> {
+  let rows: { key: string; value: string }[];
+  try {
+    rows = await engine.executeRaw<{ key: string; value: string }>(`SELECT key,value FROM config
     WHERE key IN ('embedding_model','embedding_dimensions','embedding_disabled') ORDER BY key${lock ? ' FOR SHARE' : ''}`);
+  } catch (err) {
+    if (isFactsEmbeddingQueryUnreadable(err)) return { ok: false, kind: 'unreadable', failure: unreadableFromError('config', err) };
+    throw err;
+  }
   const values = Object.fromEntries(rows.map(row => [row.key, row.value]));
   if (values.embedding_disabled !== undefined && values.embedding_disabled !== 'true' && values.embedding_disabled !== 'false') {
     throw opError('embedding_configuration', 'Selected brain embedding_disabled must be true or false.',
       'The brain\'s embedding_disabled setting is neither true nor false, so fact extraction stopped before admission. Read it, then have the user set it to true or false with gbrain config set embedding_disabled.',
       { fix: readFix('Shows the stored embedding_disabled value and the plane it comes from, read-only.', { argv: ['gbrain', 'config', 'get', 'embedding_disabled'] }) });
   }
-  if (config.embedding_disabled || values.embedding_disabled === 'true') return null;
+  if (config.embedding_disabled || values.embedding_disabled === 'true') return { ok: true, signature: null };
   const model = values.embedding_model;
-  if (!model) return null;
+  if (!model) {
+    // No recorded model means embeddings are off. A session that already
+    // embedded under a model cannot tell a missing row from a failed read.
+    if (expected) {
+      return { ok: false, kind: 'unreadable', failure: { read: 'config', message: rows.length === 0
+        ? 'config query returned no rows' : 'config query returned no embedding_model' } };
+    }
+    return { ok: true, signature: null };
+  }
   const dimensions = /^[1-9]\d*$/.test(values.embedding_dimensions ?? '') ? Number(values.embedding_dimensions) : null;
   if (!/^[^\s:]+:[^\s]+$/.test(model) || !dimensions || !Number.isSafeInteger(dimensions)) {
     throw opError('embedding_configuration', 'The selected brain has no verifiable facts embedding model and dimensions.',
       `The brain's embedding_model (${JSON.stringify(model)}) is not provider:model or embedding_dimensions is not a positive integer, so fact extraction stopped before admission. Check embedding readiness; correcting the configuration is the user's decision.`,
       { fix: embeddingsFix() });
   }
-  const shape = await readFactsEmbeddingDim(engine);
-  if (!shape.exists || !shape.columnType || shape.dims !== dimensions) {
-    throw opError('embedding_configuration', 'The selected brain facts embedding provenance does not match its vector column.',
-      `The facts vector column ${shape.exists ? `holds ${shape.dims ?? 'unknown'}-dimension vectors` : 'is missing'}, but ${model} is configured for ${dimensions}, so fact extraction stopped before admission. Check embedding readiness and show the user the mismatch.`,
-      { fix: embeddingsFix() });
+  let shape: Awaited<ReturnType<typeof readFactsEmbeddingDim>>;
+  try {
+    shape = await readFactsEmbeddingDim(engine);
+  } catch (err) {
+    if (isFactsEmbeddingQueryUnreadable(err)) return { ok: false, kind: 'unreadable', failure: unreadableFromError('catalog', err) };
+    throw err;
   }
-  return { model, dimensions };
+  // A successful empty result is the column really being absent. An errored
+  // or cancelled read never reaches here, and a null shape stays unreadable.
+  if (!shape.exists) return { ok: false, kind: 'missing_column', model, dimensions };
+  if (!shape.columnType || shape.dims == null) {
+    return { ok: false, kind: 'unreadable', failure: { read: 'catalog', message: `facts embedding column was not readable (exists=${shape.exists}, columnType=${shape.columnType ?? 'null'}, dims=${shape.dims ?? 'null'})` } };
+  }
+  if (shape.dims !== dimensions) {
+    const message = `facts vector column is ${shape.columnType}(${shape.dims}) but ${model} is configured for ${dimensions}`;
+    logFactsEmbeddingRead('mismatch', 'catalog', message);
+    throw factsEmbeddingProvenanceError(model, dimensions, shape);
+  }
+  return { ok: true, signature: { model, dimensions } };
+}
+
+async function readManagedFactsEmbedding(engine: BrainEngine, config: GBrainConfig, lock: boolean,
+  expected: FactEmbeddingSignature | null | undefined): Promise<FactEmbeddingSignature | null> {
+  const first = await readManagedFactsEmbeddingOnce(engine, config, lock, expected);
+  if (first.ok) return first.signature;
+  if (first.kind === 'unreadable') {
+    logFactsEmbeddingRead('unreadable', first.failure.read, first.failure.message, first.failure.sqlstate);
+    // Any thrown error inside the locked transaction aborts it (a 57014
+    // included). A second query on the same handle can only see 25P02.
+    if (lock && first.failure.queryError) throw factsEmbeddingUnreadableError(first.failure);
+  }
+  await pauseFactsEmbeddingRetry();
+  const second = await readManagedFactsEmbeddingOnce(engine, config, lock, expected);
+  if (second.ok) return second.signature;
+  if (first.kind === 'missing_column' && second.kind === 'missing_column') {
+    const message = `facts vector column is missing but ${second.model} is configured for ${second.dimensions}`;
+    logFactsEmbeddingRead('mismatch', 'catalog', message);
+    throw factsEmbeddingProvenanceError(second.model, second.dimensions, { exists: false, dims: null });
+  }
+  const failure = second.kind === 'unreadable' ? second.failure : first.kind === 'unreadable' ? first.failure
+    : { read: 'catalog' as const, message: 'facts embedding column was not readable' };
+  if (second.kind === 'unreadable') {
+    logFactsEmbeddingRead('unreadable', second.failure.read, second.failure.message, second.failure.sqlstate);
+  }
+  throw factsEmbeddingUnreadableError(failure);
+}
+
+export async function resolveManagedFactsEmbedding(engine: BrainEngine, config: GBrainConfig,
+  lock = false): Promise<FactEmbeddingSignature | null> {
+  return readManagedFactsEmbedding(engine, config, lock, undefined);
 }
 
 export async function assertManagedFactsEmbedding(engine: BrainEngine, config: GBrainConfig,
   expected: FactEmbeddingSignature | null | undefined, lock = false): Promise<void> {
-  const current = await resolveManagedFactsEmbedding(engine, config, lock);
+  const current = await readManagedFactsEmbedding(engine, config, lock, expected);
   if (!expected || !current || expected.model !== current.model || expected.dimensions !== current.dimensions) {
+    const from = expected ? `${expected.model} (${expected.dimensions})` : 'none';
+    const to = current ? `${current.model} (${current.dimensions})` : 'none';
+    logFactsEmbeddingRead('mismatch', 'config', `facts embedding changed from ${from} to ${to}`);
     throw opError('embedding_configuration', 'The selected brain facts embedding policy or model changed; retained vectors cannot be installed.',
       `The facts embedding changed from ${expected ? `${expected.model} (${expected.dimensions})` : 'none'} to ${current ? `${current.model} (${current.dimensions})` : 'none'} after the facts were embedded, so nothing was admitted. Run the extraction again (the same request_id is safe: nothing was accepted) to embed under the current model.`,
       { fix: embeddingsFix() });
