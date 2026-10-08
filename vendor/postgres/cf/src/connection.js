@@ -249,6 +249,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
 
     typeof options.debug === 'function' && options.debug(id, string, parameters, types)
+    typeof options.onsql === 'function' && options.onsql(id, string)
   }
 
   function write(x, fn) {
@@ -464,8 +465,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
         ? cancelReject(cancelError || Errors.connection('CONNECTION_CLOSED', options))
         : cancelResolve()
 
-    if (initial)
+    if (initial) {
+      // A startup query can still be in flight. Reject it so its promise is
+      // observed, and clear the error so reconnect does not replay it onto
+      // the parked caller query.
+      if (query) {
+        const reason = errorResponse || Errors.connection('CONNECTION_CLOSED', options, socket)
+        try { query.reject(reason) } catch { /* already settled */ }
+      }
+      query = results = errorResponse = null
+      result = new Result()
       return reconnect()
+    }
 
     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
     closedTime = performance.now()
@@ -579,7 +590,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
 
       if (needsTypes) {
         initial.reserve && (initial = null)
-        return fetchArrayTypes()
+        // Nobody awaits this startup query. A statement timeout rejects it
+        // and the parked caller query together; observe this promise so the
+        // caller can log 57014 without an unhandledRejection.
+        const pendingTypes = fetchArrayTypes()
+        pendingTypes.catch(() => { /* startup query observed */ })
+        return pendingTypes
       }
 
       const reserving = initial && initial.reserve
@@ -827,6 +843,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       backendParameters.in_hot_standby = b.pg_is_in_recovery ? 'on' : 'off'
     }
     query.execute()
+    query.catch(() => { /* startup probe observed */ })
   }
 
   function ErrorResponse(x) {

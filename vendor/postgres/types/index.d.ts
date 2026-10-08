@@ -124,6 +124,10 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
    * reused because its ReadyForQuery status was not idle ('T' or 'E').
    */
   onpoisoned: (status: string) => void;
+  /** Fired when a connection leaves or returns to the idle queue. */
+  onhold?: (connection: number, event: 'acquire' | 'release') => void;
+  /** Last statement text on a connection. Parameters are not passed. */
+  onsql?: (connection: number, query: string) => void;
   backoff: boolean | ((attemptNum: number) => number);
   max_lifetime: number | null;
   keep_alive: number | null;
@@ -724,6 +728,9 @@ declare namespace postgres {
     begin<T>(options: string, cb: (sql: TransactionSql<TTypes>) => T | Promise<T>): Promise<UnwrapPromiseArray<T>>;
 
     reserve(options?: { signal?: AbortSignal }): Promise<ReservedSql<TTypes>>
+
+    /** Idle, in-use and waiting counts. Present on a pool, not on a reserved connection. */
+    poolCensus?(): { max: number; idle: number; in_use: number; waiting: number };
   }
 
   interface TransactionSql<TTypes extends Record<string, unknown> = {}> extends ISql<TTypes>  {

@@ -10,6 +10,46 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A hosted HTTP brain that hits an unhandled database cancel now exits, so the platform can restart it. The cheap health check stays cheap.**
+
+`GET /health` is still one `SELECT 1` with a 3 second cap. Point the platform health check there. `GET /ready` is a separate probe: it returns 503 when two or more MCP requests have been running with no completion inside the window, or when the process heartbeat timer has stalled. One slow search does not flip it, and it does not call the database. Caught search timeouts still fail open and do not exit the process.
+
+### How to use it
+
+Leave the platform health check on `/health`. Probe `/ready` from a separate monitor when you want a wedged pipeline to show up as 503. `GET /health?deep=1` consults that same watchdog only when `GBRAIN_HTTP_HEALTH_DEEP=1`.
+
+| Knob | Default |
+| --- | --- |
+| `GBRAIN_HTTP_WATCHDOG_MS` | `120000` (`0` turns the pipeline check off) |
+| `GBRAIN_HTTP_WATCHDOG_HEARTBEAT_MS` | `30000` (`0` turns the heartbeat off) |
+| `GBRAIN_HTTP_WATCHDOG_MIN_INFLIGHT` | `2` |
+| `GBRAIN_HTTP_HEALTH_DEEP` | off |
+| `GBRAIN_HTTP_MAX_INFLIGHT` | `6` (`0` turns the cap off) |
+| `GBRAIN_HTTP_INFLIGHT_WAIT_MS` | `15000` |
+| `GBRAIN_HTTP_FATAL_EXIT` | on (`0` keeps the process up) |
+
+`GBRAIN_SERVE_STALL_WATCHDOG_MS` is unchanged and still off unless you set it. That one kills a process whose main thread has stopped running timers. The new watchdog does not.
+
+For one hosted replica on a transaction pooler, use port 6543 as the database URL and the session pooler (port 5432 on the same host) as the direct URL. Do not point the direct URL at the IPv6-only database host. Suggested sizes: pool 6, direct pool 2, at most 3 concurrent MCP requests. Details: `docs/ops/hosted-http-liveness.md`.
+
+### Itemized changes
+
+- Hosted HTTP exits on `unhandledRejection` and `uncaughtException`, including an unhandled statement timeout, without waiting on pool cleanup.
+- `GET /ready`, optional deep health, an in-process pipeline watchdog, and a soft cap on concurrent `POST /mcp` handlers.
+- Persistence renewal waits and statement-timeout follow-up queries are hard-capped so a 57014 cannot leave unfinished work pinned on the event loop. The original query is still awaited so its pool client can return.
+- Hosted HTTP probes database readiness on an interval and exits with status 70 after sustained client-pool starvation, so a live process with no free pool slot still restarts. `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0` keeps it up. The first 60 seconds after start are ignored.
+- A statement timeout on the driver's startup types query is observed, so a caught 57014 stays a logged persistence failure.
+- After an aborted statement, cancel is bounded (`GBRAIN_HTTP_ABORT_CANCEL_MS`, default 5 seconds). When that deadline wins, the reserved connection is discarded and the pool slot returns.
+- A facts embedding check that cannot read the settings or the facts vector column retries that read once, then fails with `facts_embedding_unreadable` (try again later; the same request_id is safe). A thrown error inside the locked admission transaction is not retried, because the transaction is already aborted. A catalog read that reports the vector column missing on both passes still fails as `embedding_configuration`. A real model or width mismatch still fails as `embedding_configuration`. The full read error is logged.
+- A read-pool success with a failed direct lane counts on the slower unreachable budget (three times the fail limit), not the fast starvation budget. Each non-fatal pool miss is logged. A probe still in flight is not started again, and a probe that finishes after the watchdog stops does not exit.
+- When the pool watchdog exits on client-pool starvation, one log line names the pool size, how many connections are in use, idle and waiting, and each held connection's owner, age and last statement (or `none`). Owners are tagged when the connection is taken (the persistence idle lane, an MCP request and tool, autopilot or a job). Statement parameters are not logged. Pool size and the in-flight caps are unchanged.
+- A remote `remove_link` without `link_source` is refused (`invalid_params`). Local `gbrain unlink` may still omit `--link-source`; it deletes every link source for that pair and prints a warning. `add_link` still defaults an omitted provenance to `manual`. Derived-link, mention and effect-link deletes do not go through this check.
+- `get_links` takes an optional `link_source` and returns only that provenance. Leaving it out keeps the current list. No migration.
+- The phrase-creator schema pack extends the creator lens with `depends_on` and `owned_by`, declared by name only. Turn it on with `gbrain schema use phrase-creator`.
+- A rejected `POST /mcp` bearer check writes one warning with the reason, method, path, user agent (120 characters) and Express `req.ip`. That address follows `GBRAIN_HTTP_TRUST_PROXY` (default `loopback`). A Railway edge is not loopback, so the default logs the proxy peer, which is the same address the HTTP rate limiter uses. `GBRAIN_HTTP_TRUST_PROXY=1` trusts one hop. The raw `X-Forwarded-For` header is not read. `client_id` is included only when verification already resolved it. The line never contains the token, a prefix, a hash or the Authorization header. The same reason, address and user agent is logged at most once a minute, and at most 30 lines a minute across every key. Overflow, including a bucket dropped past the 4096 cap, is one count on the next line. User agents are stripped of C0, DEL, C1 and the Unicode line separators.
+
 ## [0.60.102.0] - 2026-10-07
 
 **Broken facts and takes tables in your notes now get repaired by themselves.**
@@ -256,6 +296,7 @@ No other user-facing behavior changes beyond the MCP SDK security update. `bun r
 ## To take advantage of v0.60.95.0
 
 Nothing to do: this release changes tests and CI tooling only. Agents running `bun run ci:ubicloud` get burst sizing automatically; pass `--vms 4` to keep the old fleet.
+
 
 ## [0.60.94.0] - 2026-10-06
 

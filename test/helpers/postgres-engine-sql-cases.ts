@@ -62,6 +62,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'transactionOn': OOS.helper,
   'withReservedConnection': OOS.lifecycle,
   'getPoolDiagnostics': OOS.lifecycle,
+  'poolCensus': OOS.lifecycle,
   'onCheckout': OOS.lifecycle,
   'reconnect': OOS.lifecycle,
   'runUnsafe': OOS.helper,

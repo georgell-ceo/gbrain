@@ -64,7 +64,17 @@ export interface DbProbeDeps {
 
 export type DbProbeResult =
   | { ok: true }
-  | { ok: false; verdict: Exclude<ProbeVerdict, 'client_misconfigured'>; detail: string }
+  | {
+      ok: false;
+      verdict: Exclude<ProbeVerdict, 'client_misconfigured'>;
+      detail: string;
+      /**
+       * Read probe succeeded and the required direct lane failed. The server
+       * answered on the read pool, so this is not client-pool starvation.
+       * The HTTP pool watchdog counts it on the slower unreachable budget.
+       */
+      directUnready?: boolean;
+    }
   | { ok: false; verdict: 'client_misconfigured'; detail: string; configurationError: LocalConfigurationError };
 
 /**
@@ -198,6 +208,7 @@ async function probeLanes(deps: DbProbeDeps, requireDirect: boolean): Promise<Db
       return {
         ok: false,
         verdict: 'unknown',
+        directUnready: true,
         detail: `read probe succeeded; required direct probe failed: ${directErrMsg} — direct lane is not ready`,
       };
     }

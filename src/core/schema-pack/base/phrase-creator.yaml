@@ -1,0 +1,17 @@
+# phrase-creator: creator lens plus two unbound link types.
+#
+# Extends gbrain-creator and adds depends_on and owned_by by name only,
+# the same shape as related_to. No page-type binding and no inverse:
+# a page-type binding can apply the verb to links from those pages.
+
+api_version: gbrain-schema-pack-v1
+name: phrase-creator
+version: 1.0.0
+description: "Creator lens with two extra link types, depends_on and owned_by, declared by name only."
+gbrain_min_version: 0.41.0
+extends: gbrain-creator
+borrow_from: []
+
+link_types:
+  - name: depends_on
+  - name: owned_by

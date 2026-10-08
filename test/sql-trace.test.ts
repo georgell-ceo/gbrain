@@ -2,10 +2,15 @@ import { expect, test } from 'bun:test';
 import { traceSqlOptions } from '../src/core/sql-trace.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-test('the SQL trace is off by default and returns the pool options untouched', async () => {
+test('the SQL trace is off by default and does not wrap the socket', async () => {
   await withEnv({ GBRAIN_SQL_TRACE: undefined }, async () => {
     const options = { max: 2, connection: { statement_timeout: '5000' } };
-    expect(traceSqlOptions(options, 'read')).toBe(options);
+    const traced = traceSqlOptions(options, 'read') as typeof options & { socket?: unknown; onhold?: unknown; onsql?: unknown };
+    expect(traced.max).toBe(2);
+    expect(traced.connection).toEqual(options.connection);
+    expect(traced.socket).toBeUndefined();
+    expect(typeof traced.onhold).toBe('function');
+    expect(typeof traced.onsql).toBe('function');
   });
 });
 

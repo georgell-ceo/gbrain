@@ -22,6 +22,7 @@ import { resolveAuthCapabilities } from '../core/harness/capabilities.ts';
 import { resolveWritebackConfig, ambientOptsFrom } from '../core/facts/writeback-config.ts';
 import { hasScope, operationScopesAllowed } from '../core/scope.ts';
 import { summarizeMcpParams, dispatchToolCall, requestLogStatusForResult, requestMetaSessionId, acceptedPendingReceipt, unknownToolEnvelope, errorResult, dispatchRenderContext, type ToolResult } from '../mcp/dispatch.ts';
+import { mcpPoolOwner, withPoolOwner } from '../core/pool-holds.ts';
 import { toAgentError } from '../core/agent-output.ts';
 import { STATUS_TOOL_NAME, statusModeOf, statusToolResult } from '../mcp/status-mode.ts';
 import { isCallable, publishGatesFromDisabled } from '../core/ops/callable.ts';
@@ -44,7 +45,9 @@ import { serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
 import { withBearerScopeHint } from './serve-http-oauth.ts';
+import { withMcpAuthRejectLog } from './serve-http-auth-reject.ts';
 import type { ServeHttpContext } from './serve-http.ts';
+import { readHostedHttpGuards } from '../core/http-hosted-guards.ts';
 
 /** Per-request state shared by the tools/list and tools/call handlers of one POST /mcp. */
 interface McpRequestState {
@@ -119,51 +122,64 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
   // the hinted scope and never step up (claude.ai connectors) otherwise stay
   // read-only; grantScopes still caps each grant to the client row's scope.
   app.post('/mcp', withBearerScopeHint(
-    requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read', 'write'],
+    withMcpAuthRejectLog(requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl })),
+    ['read', 'write'],
   ), async (req: Request, res: Response) => {
-    const startTime = Date.now();
-    const authInfo = (req as any).auth as AuthInfo;
+    const guards = readHostedHttpGuards(ctx);
+    const slot = guards ? await guards.gate.acquire() : { ok: true as const, release: () => {} };
+    if (!slot.ok) {
+      res.status(503).json({ jsonrpc: '2.0', error: { code: -32000, message: 'server busy' }, id: null });
+      return;
+    }
+    const endWatch = guards?.watchdog.begin();
+    try {
+      const startTime = Date.now();
+      const authInfo = (req as any).auth as AuthInfo;
 
-    // Human-readable agent name is now threaded through AuthInfo by
-    // verifyAccessToken (which JOINs oauth_clients in its existing token
-    // SELECT). No per-request DB roundtrip needed. Falls back to clientId
-    // for legacy tokens or when the JOIN row's client_name is NULL.
-    const agentName = authInfo.clientName ?? authInfo.clientId;
+      // Human-readable agent name is now threaded through AuthInfo by
+      // verifyAccessToken (which JOINs oauth_clients in its existing token
+      // SELECT). No per-request DB roundtrip needed. Falls back to clientId
+      // for legacy tokens or when the JOIN row's client_name is NULL.
+      const agentName = authInfo.clientName ?? authInfo.clientId;
 
-    // WP4 (D2): per-request effective surface + fail-closed allow-set,
-    // recomputed per request (amendment 20) so rescopes/request_tools
-    // persists take effect on the next request with zero restart.
-    // Ambient writeback (opt-in, default off) resolves CONCURRENTLY with the
-    // surface read (performance review, this wave — the two independent DB
-    // waits must not serialize; an initialize-only resolve is NOT possible
-    // here because /mcp has no JSON middleware, so req.body is undefined
-    // until the SDK transport reads the stream — verified by the OAuth
-    // lifecycle test, which caught exactly that regression). Restart-free
-    // like the publish gates, fail-closed with a per-engine last-known-good
-    // bundle so a transient config blip serves the previous bundle instead
-    // of silently dropping the section mid-session. OV-A5: a token without
-    // write scope never receives the section (`remember` would be
-    // uncallable — instructions must not order impossible calls); OV2-14:
-    // extract_facts is advertised only when this token's ACTUAL visible set
-    // can call it (surface + scope + bound-client fence — the same
-    // predicates tools/list applies).
-    const canWrite = hasScope(authInfo.scopes, 'write');
-    const [{ ceiling: surfaceCeiling, effective: surface }, writeback, hostResultRows] = await Promise.all([
-      resolveEffectiveSurface(authInfo),
-      canWrite ? resolveWritebackConfig(engine, config) : Promise.resolve(null),
-      resolveResultRowsMode(engine, config),
-    ]);
-    // C1: gbrain's thin client keeps full rows. The header is unverified and
-    // selects a row shape only; it never gates anything security-relevant.
-    const resultRows = resultRowsForRequest(req.get(GBRAIN_CLIENT_HEADER), hostResultRows);
-    const mcpOperations = filterOpsForSurface(mcpOperationsBase, surface)
-      .filter(op => authInfo.allowedOperations == null || authInfo.allowedOperations.includes(op.name));
-    authInfo.effectiveSurface = surface;
-    const surfaceAllowedOps: ReadonlySet<string> | undefined =
-      surface === 'full' && authInfo.allowedOperations == null ? undefined : new Set(mcpOperations.map(o => o.name));
-    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows };
-    const server = createMcpRequestServer(ctx, state, writeback);
-    await serveMcpRequest(server, req, res);
+      // WP4 (D2): per-request effective surface + fail-closed allow-set,
+      // recomputed per request (amendment 20) so rescopes/request_tools
+      // persists take effect on the next request with zero restart.
+      // Ambient writeback (opt-in, default off) resolves CONCURRENTLY with the
+      // surface read (performance review, this wave — the two independent DB
+      // waits must not serialize; an initialize-only resolve is NOT possible
+      // here because /mcp has no JSON middleware, so req.body is undefined
+      // until the SDK transport reads the stream — verified by the OAuth
+      // lifecycle test, which caught exactly that regression). Restart-free
+      // like the publish gates, fail-closed with a per-engine last-known-good
+      // bundle so a transient config blip serves the previous bundle instead
+      // of silently dropping the section mid-session. OV-A5: a token without
+      // write scope never receives the section (`remember` would be
+      // uncallable — instructions must not order impossible calls); OV2-14:
+      // extract_facts is advertised only when this token's ACTUAL visible set
+      // can call it (surface + scope + bound-client fence — the same
+      // predicates tools/list applies).
+      const canWrite = hasScope(authInfo.scopes, 'write');
+      const [{ ceiling: surfaceCeiling, effective: surface }, writeback, hostResultRows] = await Promise.all([
+        resolveEffectiveSurface(authInfo),
+        canWrite ? resolveWritebackConfig(engine, config) : Promise.resolve(null),
+        resolveResultRowsMode(engine, config),
+      ]);
+      // C1: gbrain's thin client keeps full rows. The header is unverified and
+      // selects a row shape only; it never gates anything security-relevant.
+      const resultRows = resultRowsForRequest(req.get(GBRAIN_CLIENT_HEADER), hostResultRows);
+      const mcpOperations = filterOpsForSurface(mcpOperationsBase, surface)
+        .filter(op => authInfo.allowedOperations == null || authInfo.allowedOperations.includes(op.name));
+      authInfo.effectiveSurface = surface;
+      const surfaceAllowedOps: ReadonlySet<string> | undefined =
+        surface === 'full' && authInfo.allowedOperations == null ? undefined : new Set(mcpOperations.map(o => o.name));
+      const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows };
+      const server = createMcpRequestServer(ctx, state, writeback);
+      await serveMcpRequest(server, req, res);
+    } finally {
+      endWatch?.();
+      slot.release();
+    }
   });
 }
 
@@ -212,7 +228,10 @@ function createMcpRequestServer(
       allowedOps: surfaceAllowedOps, surface, surfaceCeiling };
   }));
   server.setRequestHandler(ListToolsRequestSchema, async () => listMcpTools(ctx, state));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => callMcpTool(ctx, state, request));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => withPoolOwner(
+    mcpPoolOwner(extra.requestId, request.params.name),
+    () => callMcpTool(ctx, state, request),
+  ));
   return server;
 }
 

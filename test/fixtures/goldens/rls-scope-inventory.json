@@ -3479,6 +3479,7 @@
         "mergeOntologyFact": "none",
         "migrateFactsToCanonical": "none",
         "onCheckout": "none",
+        "poolCensus": "none",
         "purgeDeletedPages": "none",
         "putContradictionCacheEntry": "none",
         "putDreamVerdict": "none",

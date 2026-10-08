@@ -312,6 +312,7 @@
         "mergeOntologyFact",
         "migrateFactsToCanonical",
         "onCheckout",
+        "poolCensus",
         "purgeDeletedPages",
         "putContradictionCacheEntry",
         "putDreamVerdict",

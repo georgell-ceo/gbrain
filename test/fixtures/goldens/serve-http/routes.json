@@ -143,6 +143,14 @@
     },
     {
       "handlers": [
+        "<inline>"
+      ],
+      "method": "get",
+      "path": "/ready",
+      "when": []
+    },
+    {
+      "handlers": [
         "adminLimits.total",
         "adminLimits.failures",
         "express.json()",
@@ -514,7 +522,7 @@
     },
     {
       "handlers": [
-        "withBearerScopeHint(requireBearerAuth({ verifier : resourceVerifier , resourceMetadataUrl }), [ 'read' , 'write' ])",
+        "withBearerScopeHint(withMcpAuthRejectLog(requireBearerAuth({ verifier : resourceVerifier , resourceMetadataUrl })), [ 'read' , 'write' ])",
         "<inline>"
       ],
       "method": "post",

@@ -82,6 +82,8 @@ function Postgres(a, b) {
     end
   })
 
+  sql.poolCensus = poolCensus
+
   return sql
 
   function Sql(handler) {
@@ -404,13 +406,34 @@ function Postgres(a, b) {
     }
   }
 
+  function noteHold(prev, c, queue) {
+    if (typeof options.onhold !== 'function')
+      return
+    const was = prev === busy || prev === full || prev === reserved || prev === connecting
+    const now = queue === busy || queue === full || queue === reserved || queue === connecting
+    if (was === now)
+      return
+    try { options.onhold(c.id, now ? 'acquire' : 'release') } catch (_) {}
+  }
+
+  function poolCensus() {
+    return {
+      max: options.max,
+      idle: open.length,
+      in_use: busy.length + full.length + reserved.length + connecting.length,
+      waiting: queries.length
+    }
+  }
+
   function move(c, queue) {
+    const prev = c.queue
     c.queue.remove(c)
     queue.push(c)
     c.queue = queue
     queue === open
       ? c.idleTimer.start()
       : c.idleTimer.cancel()
+    noteHold(prev, c, queue)
     return c
   }
 
@@ -618,6 +641,8 @@ function parseOptions(a, b) {
     onnotify        : o.onnotify,
     onclose         : o.onclose,
     onpoisoned      : o.onpoisoned,
+    onhold          : o.onhold,
+    onsql           : o.onsql,
     onparameter     : o.onparameter,
     socket          : o.socket,
     transform       : parseTransform(o.transform || { undefined: undefined }),

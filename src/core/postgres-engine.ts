@@ -14,7 +14,8 @@ import type { PageReadPolicy } from './types.ts';
 import { readRelationalFanout, readChainHop, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
 import postgres from '#postgres'
 import { traceSqlOptions } from './sql-trace.ts';
-import { hasPostgresCancellationCapability, postgresCancellationUnavailable, reserveWithCancellation } from './postgres-engine/cancellation.ts';
+import { readPoolCensus, type PoolCensus } from './pool-holds.ts';
+import { runCancellableUnsafe } from './postgres-engine/cancellation.ts';
 export { hasPostgresCancellationCapability } from './postgres-engine/cancellation.ts';
 import type {
   BrainEngine,
@@ -697,6 +698,11 @@ export class PostgresEngine implements BrainEngine {
    */
   /** #5801: observe connection acquisition (see CheckoutGauge.onCheckout). Duck-typed like getPoolDiagnostics. */
   onCheckout(listener: () => void): () => void { return this.checkoutGauge.onCheckout(listener); }
+
+  /** Queue lengths of the pool this engine queries. Not derived from CheckoutGauge. */
+  poolCensus(): PoolCensus | null {
+    try { return readPoolCensus(this.sql); } catch { return null; }
+  }
 
   getPoolDiagnostics(): { tracked: PoolGaugeSnapshot; poolMax: number | null; poisonedDiscards: number } | null {
     try {
@@ -2700,43 +2706,10 @@ export class PostgresEngine implements BrainEngine {
     params?: unknown[],
     opts?: RunUnsafeOpts,
   ): Promise<T[]> {
-    if (opts?.signal?.aborted) {
-      throw new DOMException('aborted', 'AbortError');
-    }
-    return (async () => {
-      const signal = opts?.signal;
-      let reserved: postgres.ReservedSql | undefined;
-      let pending: ReturnType<typeof conn.unsafe> | undefined;
-      let cancellation: Promise<void> | undefined;
-      let retired = false;
-      let owner: postgres.TransactionSql | postgres.ReservedSql = conn as unknown as postgres.TransactionSql;
-      signal?.addEventListener('abort', onAbort, { once: true });
-      try {
-        reserved = signal && typeof conn.reserve === 'function' ? await reserveWithCancellation(opts => conn.reserve(opts), signal) : undefined;
-        if (reserved) { conn = reserved; this.checkoutGauge.checkedOut(); }
-        owner = reserved ?? conn as unknown as postgres.TransactionSql;
-        if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
-        if (signal && !hasPostgresCancellationCapability(owner)) throw postgresCancellationUnavailable();
-        // #5984: parameterized statements default to named prepared statements, as tagged templates do.
-        // postgres.js ANDs this with the connection option, so a PgBouncer transaction pooler
-        // (`prepare: false`) stays unprepared; elsewhere a repeat costs one round trip instead of a
-        // describe round trip plus an execute round trip.
-        const driverOpts = { cancelFence: !!signal, prepare: opts?.prepare ?? true, ...(opts?.simple === undefined ? {} : { simple: opts.simple }) };
-        pending = conn.unsafe(sql, params as Parameters<typeof conn.unsafe>[1], driverOpts);
-        return await pending as unknown as T[];
-      } finally {
-        signal?.removeEventListener('abort', onAbort);
-        try {
-          if (cancellation) await cancellation;
-          if (retired) owner.discard();
-        } finally { reserved?.release(); }
-      }
-      function onAbort() {
-        if (!pending || cancellation) return;
-        try { cancellation = pending.cancel().catch(() => { retired = true; }); }
-        catch { retired = true; }
-      }
-    })();
+    // #5984: parameterized statements default to named prepared statements, as tagged templates do.
+    // postgres.js ANDs prepare with the connection option, so a transaction pooler (`prepare: false`)
+    // stays unprepared. Post-abort cancel is bounded in runCancellableUnsafe.
+    return runCancellableUnsafe(conn, sql, params, opts, () => { this.checkoutGauge.checkedOut(); });
   }
 
   async executeRaw<T = Record<string, unknown>>(

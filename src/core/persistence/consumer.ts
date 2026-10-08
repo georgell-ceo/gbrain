@@ -21,6 +21,9 @@ import { maybeRefreshPlannerStats } from '../planner-stats.ts';
 import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { faultPoint } from './fault-points.ts';
 import { releaseAbandonedClaims } from './effect-journal.ts';
+import { isStatementTimeoutError } from '../retry-matcher.ts';
+import { AbandonedError, settleOrAbandon } from './settle-or-abandon.ts';
+import { withPoolOwner } from '../pool-holds.ts';
 
 type PhaseObservation = { name: string; started_at: string; deadline_exceeded: boolean; attempt: number; first_conn_ms?: number };
 /** #5373: set by a task that abandons a still-running preparation after losing its claim; its root is freed only once `until` settles. */
@@ -59,6 +62,15 @@ export async function runResidentProjectionInvocation(engine: BrainEngine, hostI
 const PARKED_WORKER: Promise<void> = Promise.resolve();
 
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig, signal?: AbortSignal) => Promise<PreparedMutation>;
+
+/** Statement timeout that is not an intentional user-request cancel. */
+function statementTimeoutFollowUp(error: unknown): boolean {
+  if (error instanceof Error && /canceling statement due to user request/i.test(error.message)) return false;
+  const message = (error as { message?: unknown } | null)?.message;
+  if (typeof message === 'string' && /canceling statement due to user request/i.test(message)) return false;
+  return isStatementTimeoutError(error);
+}
+
 export class PersistenceConsumer {
   private stopping = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -204,7 +216,7 @@ export class PersistenceConsumer {
     if (!pool?.poolMax || pool.poolMax < 3 || Object.values(pool.tracked).some(count => count > 0)) return undefined;
     const held = Promise.withResolvers<void>();
     const reserved = Promise.withResolvers<ReservedConnection>();
-    const done = this.engine.withReservedConnection(async conn => { reserved.resolve(conn); await held.promise; }, { route: 'ordinary' })
+    const done = withPoolOwner('persistence:idle-lane', () => this.engine.withReservedConnection(async conn => { reserved.resolve(conn); await held.promise; }, { route: 'ordinary' }))
       .catch(error => { reserved.reject(error); });
     const aborted = Promise.withResolvers<undefined>();
     const onAbort = () => aborted.resolve(undefined);
@@ -474,7 +486,7 @@ export class PersistenceConsumer {
     const timer = setTimeout(() => {
       observation.deadline_exceeded = true; abort.abort(); this.log(name, 'deadline_exceeded', undefined, this.timingText(observation, startedAt));
     }, this.opts.phaseMs ?? 5000);
-    try { return await phaseScope.run({ observation, startedAt }, () => run(this.engine.kind === 'postgres' ? abort.signal : undefined)); }
+    try { return await withPoolOwner(`persistence:${name}`, () => phaseScope.run({ observation, startedAt }, () => run(this.engine.kind === 'postgres' ? abort.signal : undefined))); }
     catch (error) {
       const cancelled = error as { name?: unknown; code?: unknown; message?: unknown } | null;
       if (this.stopping && abort.signal.aborted && abort.signal.reason === this.abort.signal.reason
@@ -569,18 +581,42 @@ export class PersistenceConsumer {
         await releaseUnpublishedClaim(this.engine, row, releaseReason());
         return false;
       }
-      const current = await getWriteRequestById(this.engine, row.id);
-      if (current && !isTerminal(current) && current.execution_token === row.execution_token && !current.recovery) {
-        const done = await finishUnpublishedFailure(this.engine, current, error, preparationActive ? 'preparation' : 'publication');
-        if (done.state === 'failed') this.log(preparationActive ? 'preparation' : 'publication', done.error_code ?? 'storage_error', done.error_message ?? undefined);
-        return this.settled(done);
+      // phase() still awaits the cancelled query so the pool client returns.
+      // The hang to cap is a renewal that never settles, and a statement-timeout
+      // follow-up (release/read) that waits on the same saturated pool.
+      const followUp = async (): Promise<boolean> => {
+        const current = await getWriteRequestById(this.engine, row.id);
+        if (current && !isTerminal(current) && current.execution_token === row.execution_token && !current.recovery) {
+          const done = await finishUnpublishedFailure(this.engine, current, error, preparationActive ? 'preparation' : 'publication');
+          if (done.state === 'failed') this.log(preparationActive ? 'preparation' : 'publication', done.error_code ?? 'storage_error', done.error_message ?? undefined);
+          return this.settled(done);
+        }
+        throw error;
+      };
+      if (statementTimeoutFollowUp(error)) {
+        try {
+          return await settleOrAbandon(followUp(), this.opts.phaseMs ?? 5000);
+        } catch (followUpError) {
+          if (followUpError instanceof AbandonedError || statementTimeoutFollowUp(followUpError)) {
+            this.report(error);
+            return false;
+          }
+          throw followUpError;
+        }
       }
-      throw error;
+      return await followUp();
     } finally {
-      const renewal = lease.end();
-      if (renewal) this.keepUntilSettled(renewal);
+      // v0.60.102's claim lease replaces the old interval. end() returns the
+      // renewal still in flight and does not wait. Capping that wait keeps a
+      // hung renewal from pinning shutdown; tracking it until it settles would
+      // bring the hang back. The lease already treats an overrun as lost.
+      const renewing = lease.end();
       if (timeout) clearTimeout(timeout);
       this.abort.signal.removeEventListener('abort', stop); this.preparing.delete(row.id); this.executing.delete(row.id);
+      if (renewing) {
+        try { await settleOrAbandon(renewing, this.opts.phaseMs ?? 5000); }
+        catch { /* abandoned: the claim expires on its own */ }
+      }
     }
   }
   /** #5984: a claimed bulk sync head takes its directly following group members along; one row runs the single path. */

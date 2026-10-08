@@ -200,7 +200,7 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   add_tag: { slug: WORLD_PAGE_SLUG, tag: 'sweep-tag' },
   remove_tag: { slug: WORLD_PAGE_SLUG, tag: 'sweep-tag' },
   add_link: { from: WORLD_PAGE_SLUG, to: WORLD_FENCE_SLUG },
-  remove_link: { from: WORLD_PAGE_SLUG, to: WORLD_FENCE_SLUG },
+  remove_link: { from: WORLD_PAGE_SLUG, to: WORLD_FENCE_SLUG, link_source: 'manual' },
   add_timeline_entry: { slug: WORLD_PAGE_SLUG, date: '2026-01-03', summary: 'fresh sweep timeline entry' },
   takes_add: { slug: WORLD_PAGE_SLUG, claim: 'fresh sweep take', kind: 'take', holder: 'world' },
   delete_page: { slug: 'notes/sweep-fresh-write' },

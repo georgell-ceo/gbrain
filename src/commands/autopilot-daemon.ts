@@ -13,6 +13,7 @@ import { join } from 'path';
 import { loadPreferences } from '../core/preferences.ts';
 import { registerCleanup } from '../core/process-cleanup.ts';
 import { dispatchAutopilotTick } from './autopilot-dispatch.ts';
+import { withPoolOwner } from '../core/pool-holds.ts';
 import { runNightlyQualityProbeStep, runParserProbeStep } from './autopilot-probes.ts';
 import { resolveChildCliInvocation } from '../core/minions/job-isolation.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -608,7 +609,7 @@ async function runInlineCycle(
       const { runCycle } = await import('../core/cycle.ts');
       // #1872: track the promise so closeEngine can drain it on shutdown,
       // and pass the abort signal so the cycle winds down between phases.
-      const cyclePromise = runCycle(engine, {
+      const cyclePromise = withPoolOwner('autopilot', () => runCycle(engine, {
         brainDir: repoPath,
         // Autopilot daemon path: pulls by default (matches
         // pre-v0.17 autopilot behavior). CLI dream defaults false
@@ -618,7 +619,7 @@ async function runInlineCycle(
         yieldBetweenPhases: async () => {
           await new Promise(r => setImmediate(r));
         },
-      });
+      }));
       state.inflightInlineCycle = cyclePromise;
       const report = await cyclePromise.finally(() => { state.inflightInlineCycle = null; });
       // Only 'failed' (every attempted phase failed) trips the autopilot
