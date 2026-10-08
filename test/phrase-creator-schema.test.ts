@@ -13,12 +13,12 @@ import { operations, type OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-const child = loadPackFromFile(bundledPackPath('phrase-creator')!);
-
 describe('bundled phrase-creator schema', () => {
   test('loads as a built-in pack that extends gbrain-creator', () => {
     expect(BUNDLED_PACK_NAMES).toContain('phrase-creator');
-    expect(bundledPackPath('phrase-creator')).toBeTruthy();
+    const path = bundledPackPath('phrase-creator');
+    expect(path).toBeTruthy();
+    const child = loadPackFromFile(path!);
     expect(child.name).toBe('phrase-creator');
     expect(child.extends).toBe('gbrain-creator');
     expect(child.link_types).toEqual([{ name: 'depends_on' }, { name: 'owned_by' }]);
