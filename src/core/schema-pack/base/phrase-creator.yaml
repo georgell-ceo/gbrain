@@ -1,4 +1,4 @@
-# phrase-creator — creator lens plus two unbound link types.
+# phrase-creator: creator lens plus two unbound link types.
 #
 # Extends gbrain-creator and adds depends_on and owned_by by name only,
 # the same shape as related_to. No page-type binding and no inverse:
