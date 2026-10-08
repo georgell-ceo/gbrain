@@ -46,6 +46,7 @@ For one hosted replica on a transaction pooler, use port 6543 as the database UR
 - A read-pool success with a failed direct lane counts on the slower unreachable budget (three times the fail limit), not the fast starvation budget. Each non-fatal pool miss is logged. A probe still in flight is not started again, and a probe that finishes after the watchdog stops does not exit.
 - When the pool watchdog exits on client-pool starvation, one log line names the pool size, how many connections are in use, idle and waiting, and each held connection's owner, age and last statement (or `none`). Owners are tagged when the connection is taken (the persistence idle lane, an MCP request and tool, autopilot or a job). Statement parameters are not logged. Pool size and the in-flight caps are unchanged.
 - A remote `remove_link` without `link_source` is refused (`invalid_params`). Local `gbrain unlink` may still omit `--link-source`; it deletes every link source for that pair and prints a warning. `add_link` still defaults an omitted provenance to `manual`. Derived-link, mention and effect-link deletes do not go through this check.
+- `get_links` takes an optional `link_source` and returns only that provenance. Leaving it out keeps the current list. No migration.
 - The phrase-creator schema pack extends the creator lens with `depends_on` and `owned_by`, declared by name only. Turn it on with `gbrain schema use phrase-creator`.
 
 ## [0.60.102.0] - 2026-10-07

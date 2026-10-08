@@ -307,11 +307,14 @@ async function readLinkEdges(
   const { requested, policy } = await resolveLinkReadScope(ctx, p, opName);
   const temporal = await resolveEdgeTemporal(ctx, p, opName);
   const linkType = typeof p.link_type === 'string' && p.link_type ? p.link_type : undefined;
+  const linkSource = typeof p.link_source === 'string' && p.link_source ? p.link_source : undefined;
   // Rows come back annotated with their relationship status; the policy is
   // applied below so hidden former relationships can be counted and reported.
   const annotate = temporal.disabled ? undefined : { ...temporal, status: 'all' as const, during: undefined };
   const finish = (links: Link[]): Link[] => {
-    const typed = linkType ? links.filter(l => l.link_type === linkType) : links;
+    const typed = (linkType || linkSource)
+      ? links.filter(l => (linkType === undefined || l.link_type === linkType) && (linkSource === undefined || l.link_source === linkSource))
+      : links;
     const { kept, hidden } = filterTemporalLinks(typed, temporal);
     reportTemporal(ctx, opName, p, temporal, hidden);
     return kept;
@@ -402,10 +405,11 @@ const get_links: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'retrieval',
-  description: 'List a page\'s outgoing links (typed edges to other pages). Use when exploring what a page points at; rows carry status and dates, live relationships by default (status: "all" for history, during: "2022" for a period). Pass source_id or all_sources to widen. Needs read scope. On page_not_found: resolve the slug with resolve_slugs.',
+  description: 'List a page\'s outgoing links (typed edges to other pages). Use when exploring what a page points at; rows carry status and dates, live relationships by default (status: "all" for history, during: "2022" for a period). Pass source_id or all_sources to widen. Pass link_source to keep one provenance. Needs read scope. On page_not_found: resolve the slug with resolve_slugs.',
   params: {
     slug: { type: 'string', required: true, description: 'Slug of the page whose outgoing links to list.' },
     link_type: { type: 'string', description: 'Only this type.' },
+    link_source: { type: 'string', description: 'Only this provenance.' },
     ...TEMPORAL_EDGE_PARAMS,
     source_id: LINK_SOURCE_ID_PARAM,
     all_sources: LINK_ALL_SOURCES_PARAM,

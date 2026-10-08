@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 207595,
-    "stdoutSha256": "8e6870ce608784d21d2b3c8e845ca5e2aac89f8d62401e77a9a0611ec998ac52",
+    "stdoutBytes": 207781,
+    "stdoutSha256": "9db00b48b32437e6cf42be19b94aa9019156e40df8aae5f9980302ff8b085ae5",
     "toolNames": [
       "remember",
       "entity",
@@ -1705,7 +1705,7 @@
         "scope": "write"
       },
       {
-        "description": "List a page's outgoing links (typed edges to other pages). Use when exploring what a page points at; rows carry status and dates, live relationships by default (status: \"all\" for history, during: \"2022\" for a period). Pass source_id or all_sources to widen. Needs read scope. On page_not_found: resolve the slug with resolve_slugs.",
+        "description": "List a page's outgoing links (typed edges to other pages). Use when exploring what a page points at; rows carry status and dates, live relationships by default (status: \"all\" for history, during: \"2022\" for a period). Pass source_id or all_sources to widen. Pass link_source to keep one provenance. Needs read scope. On page_not_found: resolve the slug with resolve_slugs.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -1714,6 +1714,7 @@
           "all_sources": "boolean?",
           "as_of": "string?",
           "during": "string?",
+          "link_source": "string?",
           "link_type": "string?",
           "slug": "string",
           "source_id": "string?",
@@ -1732,6 +1733,10 @@
             },
             "during": {
               "description": "Period: 2022, 2022-03 or 2021..2023.",
+              "type": "string"
+            },
+            "link_source": {
+              "description": "Only this provenance.",
               "type": "string"
             },
             "link_type": {
