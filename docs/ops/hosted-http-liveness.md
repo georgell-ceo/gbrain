@@ -14,7 +14,7 @@ An unhandled rejection, including an unhandled statement timeout (`57014`, `canc
 
 `GBRAIN_SERVE_STALL_WATCHDOG_MS` is a different, opt-in control. It kills the process when the main thread stops running timers at all (a synchronous wedge). It stays off unless you set it.
 
-A starved client pool with a live event loop does not fail `/ready` and raises no exception, so a host that restarts only on process exit would wait forever. The pool watchdog probes database readiness on an interval and exits with status 70 after sustained `pool_starved` or `unknown` verdicts. `server_unreachable` uses three times that fail count. `client_misconfigured` does not exit. The first 60 seconds after start are a grace period. `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0` keeps the process up.
+A starved client pool with a live event loop does not fail `/ready` and raises no exception, so a host that restarts only on process exit would wait forever. The pool watchdog probes database readiness on an interval and exits with status 70 after sustained `pool_starved` or `unknown` verdicts. `server_unreachable` uses three times that fail count. A read-pool success whose direct lane failed uses that same slower count: the read pool can still serve, so it is not client-pool starvation. `client_misconfigured` does not exit. Each miss short of the limit is logged. A probe still in flight is not started again. The first 60 seconds after start are a grace period. `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0` keeps the process up.
 
 After an aborted statement, cancel is waited on only until `GBRAIN_HTTP_ABORT_CANCEL_MS` (default 5000). When that deadline wins, the reserved connection is discarded so the pool slot returns.
 
@@ -30,7 +30,7 @@ After an aborted statement, cancel is waited on only until `GBRAIN_HTTP_ABORT_CA
 | `GBRAIN_HTTP_INFLIGHT_WAIT_MS` | `15000` | How long a request waits for a slot. |
 | `GBRAIN_HTTP_FATAL_EXIT` | on | `0` keeps the process up after an unhandled rejection, and turns the pool watchdog off. |
 | `GBRAIN_HTTP_POOL_WATCHDOG_MS` | `15000` | How often the pool watchdog probes. `0` turns it off. |
-| `GBRAIN_HTTP_POOL_WATCHDOG_FAILS` | `4` | Consecutive `pool_starved` or `unknown` probes before exit 70. `server_unreachable` waits three times this long. |
+| `GBRAIN_HTTP_POOL_WATCHDOG_FAILS` | `4` | Consecutive `pool_starved` or `unknown` probes before exit 70. `server_unreachable`, and a read success with a failed direct lane, wait three times this long. |
 | `GBRAIN_HTTP_ABORT_CANCEL_MS` | `5000` | After an abort, how long to wait for cancel before discarding the reserved connection. |
 | `GBRAIN_SERVE_STALL_WATCHDOG_MS` | off | Optional synchronous-loop kill. Floor 15000. |
 

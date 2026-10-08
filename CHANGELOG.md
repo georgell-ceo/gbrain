@@ -43,6 +43,8 @@ For one hosted replica on a transaction pooler, use port 6543 as the database UR
 - A statement timeout on the driver's startup types query is observed, so a caught 57014 stays a logged persistence failure.
 - After an aborted statement, cancel is bounded (`GBRAIN_HTTP_ABORT_CANCEL_MS`, default 5 seconds). When that deadline wins, the reserved connection is discarded and the pool slot returns.
 - A facts embedding check that cannot read the settings or the facts vector column retries that read once, then fails with `facts_embedding_unreadable` (try again later; the same request_id is safe). A thrown error inside the locked admission transaction is not retried, because the transaction is already aborted. A catalog read that reports the vector column missing on both passes still fails as `embedding_configuration`. A real model or width mismatch still fails as `embedding_configuration`. The full read error is logged.
+- A read-pool success with a failed direct lane counts on the slower unreachable budget (three times the fail limit), not the fast starvation budget. Each non-fatal pool miss is logged. A probe still in flight is not started again, and a probe that finishes after the watchdog stops does not exit.
+- The phrase-creator schema pack extends the creator lens with `depends_on` and `owned_by`, declared by name only. Turn it on with `gbrain schema use phrase-creator`.
 
 ## [0.60.102.0] - 2026-10-07
 

@@ -10,7 +10,11 @@
  * Hard off: `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0`.
  * `client_misconfigured` does not exit (a restart will not fix the config).
  * `server_unreachable` uses three times the fail limit so a brief network
- * blip does not restart the process.
+ * blip does not restart the process. A read-pool success whose direct lane
+ * failed (`directUnready`) uses that same slower budget: the read pool can
+ * still serve, so it is not treated as client-pool starvation.
+ * Each miss short of the limit is logged. A tick still in flight is not
+ * started again, and a tick that finishes after stop does not exit.
  */
 import {
   DIRECT_PROBE_TIMEOUT_MS,
@@ -139,9 +143,17 @@ export function createHttpPoolWatchdog(
   let fails = 0;
   let unreachable = 0;
   let exited = false;
+  let inflight = false;
+  let stopped = false;
+
+  function slowBudget(result: DbProbeResult): boolean {
+    if (result.ok || result.verdict === 'client_misconfigured') return false;
+    if (result.verdict === 'server_unreachable') return true;
+    return result.verdict === 'unknown' && result.directUnready === true;
+  }
 
   async function tick(): Promise<void> {
-    if (exited) return;
+    if (exited || stopped) return;
     if (now() - startedAt < graceMs) return;
     let result: DbProbeResult;
     try {
@@ -153,25 +165,33 @@ export function createHttpPoolWatchdog(
         detail: err instanceof Error ? err.message : String(err),
       };
     }
+    if (exited || stopped) return;
     if (result.ok) {
       fails = 0;
       unreachable = 0;
       return;
     }
     if (result.verdict === 'client_misconfigured') return;
-    if (result.verdict === 'server_unreachable') {
+    if (slowBudget(result)) {
       unreachable++;
       fails = 0;
-      if (unreachable >= maxFails * 3) die(result.verdict);
+      const limit = maxFails * 3;
+      if (unreachable >= limit) die(result.verdict);
+      else note(result.verdict, unreachable, limit);
       return;
     }
     unreachable = 0;
     fails++;
     if (fails >= maxFails) die(result.verdict);
+    else note(result.verdict, fails, maxFails);
+  }
+
+  function note(verdict: string, n: number, limit: number): void {
+    log(`[hosted-http] pool watchdog miss (${verdict}) ${n}/${limit}`);
   }
 
   function die(verdict: string): void {
-    if (exited) return;
+    if (exited || stopped) return;
     exited = true;
     log(`[hosted-http] fatal pool starvation (${verdict}); exiting so the host can restart`);
     exit(HTTP_POOL_STARVATION_EXIT);
@@ -182,12 +202,16 @@ export function createHttpPoolWatchdog(
     tick,
     start() {
       const timer = setInterval(() => {
-        void tick().catch((err) => {
-          log(`[hosted-http] pool watchdog probe failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        if (inflight || stopped) return;
+        inflight = true;
+        void tick()
+          .catch((err) => {
+            log(`[hosted-http] pool watchdog probe failed: ${err instanceof Error ? err.message : String(err)}`);
+          })
+          .finally(() => { inflight = false; });
       }, everyMs);
       timer.unref?.();
-      return () => { clearInterval(timer); };
+      return () => { stopped = true; clearInterval(timer); };
     },
   };
 }

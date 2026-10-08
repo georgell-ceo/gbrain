@@ -20,6 +20,19 @@ function healthy(): DbProbeResult {
   return { ok: true };
 }
 
+function directUnready(): DbProbeResult {
+  return {
+    ok: false,
+    verdict: 'unknown',
+    directUnready: true,
+    detail: 'read probe succeeded; required direct probe failed',
+  };
+}
+
+function plainUnknown(): DbProbeResult {
+  return { ok: false, verdict: 'unknown', detail: 'read probe failed; no direct lane' };
+}
+
 describe('http pool watchdog', () => {
   test('sustained pool starvation exits after N failures', async () => {
     const exits: number[] = [];
@@ -38,8 +51,8 @@ describe('http pool watchdog', () => {
     expect(exits).toEqual([]);
     await wd.tick();
     expect(exits).toEqual([HTTP_POOL_STARVATION_EXIT]);
-    expect(logs[0]).toContain('pool_starved');
-    expect(logs[0]).toContain('exiting so the host can restart');
+    expect(logs.some(line => line.includes('pool watchdog miss (pool_starved) 1/4'))).toBe(true);
+    expect(logs.some(line => line.includes('pool_starved') && line.includes('exiting so the host can restart'))).toBe(true);
     await wd.tick();
     expect(exits).toEqual([HTTP_POOL_STARVATION_EXIT]);
   });
@@ -111,6 +124,101 @@ describe('http pool watchdog', () => {
     t = 60_000;
     await wd.tick();
     expect(exits).toEqual([HTTP_POOL_STARVATION_EXIT]);
+  });
+
+  test('a plain unknown still uses the fast budget', async () => {
+    const exits: number[] = [];
+    const wd = createHttpPoolWatchdog(engine, {
+      everyMs: 15_000,
+      maxFails: 4,
+      fatalExit: true,
+      graceMs: 0,
+      now: () => 1_000_000,
+      exit: (code) => { exits.push(code); },
+      log: () => {},
+      probe: async () => plainUnknown(),
+    });
+    for (let i = 0; i < 3; i++) await wd.tick();
+    expect(exits).toEqual([]);
+    await wd.tick();
+    expect(exits).toEqual([HTTP_POOL_STARVATION_EXIT]);
+  });
+
+  test('read success with a failed direct lane uses the slower budget', async () => {
+    const exits: number[] = [];
+    const logs: string[] = [];
+    const wd = createHttpPoolWatchdog(engine, {
+      everyMs: 15_000,
+      maxFails: 4,
+      fatalExit: true,
+      graceMs: 0,
+      now: () => 1_000_000,
+      exit: (code) => { exits.push(code); },
+      log: (line) => { logs.push(line); },
+      probe: async () => directUnready(),
+    });
+    for (let i = 0; i < 4; i++) await wd.tick();
+    expect(exits).toEqual([]);
+    for (let i = 0; i < 7; i++) await wd.tick();
+    expect(exits).toEqual([]);
+    expect(logs.some(line => line.includes('pool watchdog miss (unknown) 1/12'))).toBe(true);
+    await wd.tick();
+    expect(exits).toEqual([HTTP_POOL_STARVATION_EXIT]);
+  });
+
+  test('a tick still in flight is not started again', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const wd = createHttpPoolWatchdog(engine, {
+      everyMs: 15,
+      maxFails: 4,
+      fatalExit: true,
+      graceMs: 0,
+      exit: () => {},
+      log: () => {},
+      probe: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await gate;
+        active -= 1;
+        return healthy();
+      },
+    });
+    const stop = wd.start();
+    try {
+      await new Promise(resolve => setTimeout(resolve, 80));
+      expect(maxActive).toBe(1);
+    } finally {
+      release();
+      stop();
+    }
+  });
+
+  test('a probe that finishes after stop does not exit', async () => {
+    const exits: number[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const wd = createHttpPoolWatchdog(engine, {
+      everyMs: 15_000,
+      maxFails: 1,
+      fatalExit: true,
+      graceMs: 0,
+      now: () => 1_000_000,
+      exit: (code) => { exits.push(code); },
+      log: () => {},
+      probe: async () => {
+        await gate;
+        return starved();
+      },
+    });
+    const pending = wd.tick();
+    const stop = wd.start();
+    stop();
+    release();
+    await pending;
+    expect(exits).toEqual([]);
   });
 
   test('hosted guards leave the pool watchdog off when fatal exit is off', () => {

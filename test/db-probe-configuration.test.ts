@@ -58,7 +58,7 @@ describe('typed database configuration faults', () => {
 
   test('startup direct-only network fault is unknown, not a server outage', async () => {
     const result = await runDbReadinessProbe({ ...budgets, probeRead: success, probeDirect: fail(new Error('ECONNREFUSED')) });
-    expect(result.ok === false && result.verdict).toBe('unknown');
+    expect(result).toMatchObject({ ok: false, verdict: 'unknown', directUnready: true });
   });
 
   test('single-lane healthy readiness requires no invented direct capability', async () => {
