@@ -42,7 +42,7 @@ For one hosted replica on a transaction pooler, use port 6543 as the database UR
 - Hosted HTTP probes database readiness on an interval and exits with status 70 after sustained client-pool starvation, so a live process with no free pool slot still restarts. `GBRAIN_HTTP_POOL_WATCHDOG_MS=0` or `GBRAIN_HTTP_FATAL_EXIT=0` keeps it up. The first 60 seconds after start are ignored.
 - A statement timeout on the driver's startup types query is observed, so a caught 57014 stays a logged persistence failure.
 - After an aborted statement, cancel is bounded (`GBRAIN_HTTP_ABORT_CANCEL_MS`, default 5 seconds). When that deadline wins, the reserved connection is discarded and the pool slot returns.
-- A facts embedding check that cannot read the settings or the facts vector column retries that read once, then fails with `facts_embedding_unreadable` (try again later; the same request_id is safe). A real model or width mismatch still fails as `embedding_configuration`. The full read error is logged.
+- A facts embedding check that cannot read the settings or the facts vector column retries that read once, then fails with `facts_embedding_unreadable` (try again later; the same request_id is safe). A thrown error inside the locked admission transaction is not retried, because the transaction is already aborted. A catalog read that reports the vector column missing on both passes still fails as `embedding_configuration`. A real model or width mismatch still fails as `embedding_configuration`. The full read error is logged.
 
 ## [0.60.94.0] - 2026-10-06
 
