@@ -23,7 +23,8 @@ describe('Eng-review D3 — executeRaw has no per-call retry wrapper', () => {
     // v0.42.24.0 (eng-review D1): the cancellation plumbing shared by executeRaw
     // and executeRawDirect was extracted into a private `runUnsafe(conn, ...)`
     // helper. executeRaw / executeRawDirect now pick a connection and delegate;
-    // the single `conn.unsafe(` call lives in runUnsafe. The D3 invariant (no
+    // the single `conn.unsafe(` call lives in runCancellableUnsafe, which
+    // runUnsafe delegates to. The D3 invariant (no
     // per-call retry wrapper) is unchanged — it just spans the delegate now, so
     // this guard checks both the public methods AND the shared helper.
 
@@ -48,19 +49,24 @@ describe('Eng-review D3 — executeRaw has no per-call retry wrapper', () => {
     expect(directBody).toContain('this.runUnsafe');
     expect((directBody.match(/conn\.unsafe\(/g) || []).length).toBe(0);
 
-    // The shared helper issues conn.unsafe EXACTLY ONCE (no retry re-issue) and
-    // never reconnects. Its try/catch is ONLY the AbortSignal cancellation
-    // swallow (v0.41.18.0 A20), NOT a connection retry.
+    // runUnsafe delegates to runCancellableUnsafe. The single raw conn.unsafe
+    // lives there, so a hung cancel can still return the pool slot. There is
+    // still exactly one issue of the statement, and no reconnect or re-issue.
     const helperMatch = src.match(/private runUnsafe<T>\(\s*conn:[^)]*\):\s*Promise<T\[\]>\s*\{([\s\S]*?)\n  \}/);
     expect(helperMatch).not.toBeNull();
     const helperBody = helperMatch![1];
     expect(helperBody).not.toContain('this.reconnect()');
-    expect((helperBody.match(/conn\.unsafe\(/g) || []).length).toBe(1);
-    if (helperBody.includes('catch')) {
-      // If catch exists, it must be the cancel-swallow shape, NOT a retry shape.
-      expect(helperBody).not.toMatch(/catch[^{]*\{[\s\S]*?conn\.unsafe/);
-      expect(helperBody).not.toMatch(/catch[^{]*\{[\s\S]*?setTimeout/);
-    }
+    expect(helperBody).toContain('runCancellableUnsafe');
+    expect((helperBody.match(/conn\.unsafe\(/g) || []).length).toBe(0);
+    // test-reads-source-ok[structural]: pins the one raw unsafe call inside runCancellableUnsafe
+    const cancelSrc = readFileSync(resolve('src/core/postgres-engine/cancellation.ts'), 'utf-8');
+    const cancelStart = cancelSrc.indexOf('export function runCancellableUnsafe');
+    expect(cancelStart).toBeGreaterThanOrEqual(0);
+    const cancelNext = cancelSrc.indexOf('\nexport ', cancelStart + 1);
+    const cancelBody = cancelSrc.slice(cancelStart, cancelNext === -1 ? undefined : cancelNext);
+    expect((cancelSrc.match(/conn\.unsafe\(/g) || []).length).toBe(1);
+    expect((cancelBody.match(/conn\.unsafe\(/g) || []).length).toBe(1);
+    expect(cancelBody).not.toContain('reconnect(');
   });
 
   it('PostgresEngine.reconnect() still exists for supervisor-driven recovery', () => {
