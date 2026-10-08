@@ -554,13 +554,14 @@ test('a renewal stuck past its deadline frees the slot, keeps the root until the
   const attempts: string[] = [];
   let firstToken: string | undefined;
   const restore = interceptRenewals((_id, token) => token === firstToken ? hungRenewal.promise : undefined);
+  const phaseMs = 40;
   const consumer = new PersistenceConsumer(engine, { engine: 'pglite' }, async (_engine, row) => {
     attempts.push(row.id);
     if (row.id !== stuck.id) return prepared(row, sources);
     if (firstToken) return prepared(row, sources);
     firstToken = row.execution_token!;
     return firstAttempt.promise;
-  }, { hostId: config.hostId, concurrency: 1, pollMs: 20, renewalIntervalMs: 5, phaseMs: 40, onError: () => {} });
+  }, { hostId: config.hostId, concurrency: 1, pollMs: 20, renewalIntervalMs: 5, phaseMs, onError: () => {} });
   try {
     consumer.start();
     await waitFor(() => firstToken !== undefined, { timeoutMs: 5_000 });
@@ -580,12 +581,16 @@ test('a renewal stuck past its deadline frees the slot, keeps the root until the
     expect(attempts.filter(id => id === stuck.id)).toHaveLength(2);
     expect(await pageBody('claim-lease/stuck', sources[0].id)).toBe('fresh body');
 
-    let stopped = false;
-    const stopping = consumer.stop().then(() => { stopped = true; });
-    await Bun.sleep(60);
-    expect(stopped).toBe(false);
-    hungRenewal.resolve([]);
-    await stopping;
+    // The cap abandons a renewal that is still in flight once phaseMs elapses.
+    // stop() must return on that budget. It must not stay pending until the
+    // hung renewal settles.
+    let renewalSettled = false;
+    void hungRenewal.promise.then(() => { renewalSettled = true; }, () => { renewalSettled = true; });
+    const slackMs = 400;
+    const started = Date.now();
+    await consumer.stop();
+    expect(Date.now() - started).toBeLessThan(phaseMs + slackMs);
+    expect(renewalSettled).toBe(false);
     await assertCommittedSnapshot(engine, (await getWriteRequestById(engine, stuck.id))!);
     await assertCommittedSnapshot(engine, (await getWriteRequestById(engine, elsewhere.id))!);
     await assertConservation(engine);
