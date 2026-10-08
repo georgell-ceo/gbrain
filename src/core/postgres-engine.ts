@@ -14,6 +14,7 @@ import type { PageReadPolicy } from './types.ts';
 import { readRelationalFanout, readChainHop, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
 import postgres from '#postgres'
 import { traceSqlOptions } from './sql-trace.ts';
+import { readPoolCensus, type PoolCensus } from './pool-holds.ts';
 import { runCancellableUnsafe } from './postgres-engine/cancellation.ts';
 export { hasPostgresCancellationCapability } from './postgres-engine/cancellation.ts';
 import type {
@@ -697,6 +698,11 @@ export class PostgresEngine implements BrainEngine {
    */
   /** #5801: observe connection acquisition (see CheckoutGauge.onCheckout). Duck-typed like getPoolDiagnostics. */
   onCheckout(listener: () => void): () => void { return this.checkoutGauge.onCheckout(listener); }
+
+  /** Queue lengths of the pool this engine queries. Not derived from CheckoutGauge. */
+  poolCensus(): PoolCensus | null {
+    try { return readPoolCensus(this.sql); } catch { return null; }
+  }
 
   getPoolDiagnostics(): { tracked: PoolGaugeSnapshot; poolMax: number | null; poisonedDiscards: number } | null {
     try {

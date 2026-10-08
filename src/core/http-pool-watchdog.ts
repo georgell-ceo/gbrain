@@ -15,6 +15,8 @@
  * still serve, so it is not treated as client-pool starvation.
  * Each miss short of the limit is logged. A tick still in flight is not
  * started again, and a tick that finishes after stop does not exit.
+ * The `pool_starved` exit adds one line: pool size, in use, idle, waiting,
+ * and each held connection's owner, age and last statement (or none).
  */
 import {
   DIRECT_PROBE_TIMEOUT_MS,
@@ -23,6 +25,7 @@ import {
   type DbProbeResult,
   type PoolDiagnostics,
 } from './minions/db-probe.ts';
+import { formatPoolStarvationLine, poolHoldSnapshot, type PoolCensus } from './pool-holds.ts';
 
 export const HTTP_POOL_WATCHDOG_DEFAULTS = {
   everyMs: 15_000,
@@ -39,6 +42,7 @@ export interface HttpPoolWatchdogEngine {
   executeRaw(sql: string, params?: unknown[], opts?: { signal?: AbortSignal }): Promise<unknown>;
   executeRawDirect?(sql: string, params?: unknown[], opts?: { signal?: AbortSignal }): Promise<unknown>;
   getPoolDiagnostics?(): PoolDiagnostics | null;
+  poolCensus?(): PoolCensus | null;
   connectionManager?: { isDualPoolActive?: () => boolean };
 }
 
@@ -133,12 +137,13 @@ export function createHttpPoolWatchdog(
   if (!enabled || !engine) {
     return { label, tick: async () => {}, start: () => () => {} };
   }
+  const watched = engine;
 
   const exit = opts.exit ?? ((code: number) => { process.exit(code); });
   const log = opts.log ?? ((line: string) => { console.error(line); });
   const now = opts.now ?? (() => Date.now());
   const graceMs = opts.graceMs ?? HTTP_POOL_WATCHDOG_DEFAULTS.graceMs;
-  const probe = opts.probe ?? (() => defaultProbe(engine));
+  const probe = opts.probe ?? (() => defaultProbe(watched));
   const startedAt = now();
   let fails = 0;
   let unreachable = 0;
@@ -194,6 +199,13 @@ export function createHttpPoolWatchdog(
     if (exited || stopped) return;
     exited = true;
     log(`[hosted-http] fatal pool starvation (${verdict}); exiting so the host can restart`);
+    if (verdict === 'pool_starved') {
+      try {
+        log(formatPoolStarvationLine(watched.poolCensus?.() ?? null, poolHoldSnapshot()));
+      } catch (err) {
+        log(`[hosted-http] pool_starved holders unavailable (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
     exit(HTTP_POOL_STARVATION_EXIT);
   }
 

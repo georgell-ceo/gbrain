@@ -23,6 +23,7 @@ import { faultPoint } from './fault-points.ts';
 import { releaseAbandonedClaims } from './effect-journal.ts';
 import { isStatementTimeoutError } from '../retry-matcher.ts';
 import { AbandonedError, settleOrAbandon } from './settle-or-abandon.ts';
+import { withPoolOwner } from '../pool-holds.ts';
 
 type PhaseObservation = { name: string; started_at: string; deadline_exceeded: boolean; attempt: number; first_conn_ms?: number };
 /** #5373: set by a task that abandons a still-running preparation after losing its claim; its root is freed only once `until` settles. */
@@ -215,7 +216,7 @@ export class PersistenceConsumer {
     if (!pool?.poolMax || pool.poolMax < 3 || Object.values(pool.tracked).some(count => count > 0)) return undefined;
     const held = Promise.withResolvers<void>();
     const reserved = Promise.withResolvers<ReservedConnection>();
-    const done = this.engine.withReservedConnection(async conn => { reserved.resolve(conn); await held.promise; }, { route: 'ordinary' })
+    const done = withPoolOwner('persistence:idle-lane', () => this.engine.withReservedConnection(async conn => { reserved.resolve(conn); await held.promise; }, { route: 'ordinary' }))
       .catch(error => { reserved.reject(error); });
     const aborted = Promise.withResolvers<undefined>();
     const onAbort = () => aborted.resolve(undefined);
@@ -485,7 +486,7 @@ export class PersistenceConsumer {
     const timer = setTimeout(() => {
       observation.deadline_exceeded = true; abort.abort(); this.log(name, 'deadline_exceeded', undefined, this.timingText(observation, startedAt));
     }, this.opts.phaseMs ?? 5000);
-    try { return await phaseScope.run({ observation, startedAt }, () => run(this.engine.kind === 'postgres' ? abort.signal : undefined)); }
+    try { return await withPoolOwner(`persistence:${name}`, () => phaseScope.run({ observation, startedAt }, () => run(this.engine.kind === 'postgres' ? abort.signal : undefined))); }
     catch (error) {
       const cancelled = error as { name?: unknown; code?: unknown; message?: unknown } | null;
       if (this.stopping && abort.signal.aborted && abort.signal.reason === this.abort.signal.reason

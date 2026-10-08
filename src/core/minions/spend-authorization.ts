@@ -16,6 +16,7 @@
  * Every other job is `unrecorded` and runs under its producer's own budget.
  */
 import { randomUUIDv7 } from 'bun';
+import { jobPoolOwner, withPoolOwner } from '../pool-holds.ts';
 import type { BrainEngine } from '../engine.ts';
 import { shellQuote, type Action, type Effect } from '../agent-output.ts';
 import { DEFAULT_PAID_CAP_USD, resumeMaxUsd, type Authorization } from '../consent.ts';
@@ -273,6 +274,15 @@ async function logSpendBasis(engine: BrainEngine, job: MinionJob, record: SpendA
  * most `MAX_PRESSURE_RENEWALS` times.
  */
 export async function runWithJobSpend<T>(
+  engine: BrainEngine,
+  job: MinionJob,
+  ctx: MinionJobContext,
+  handler: (ctx: MinionJobContext) => Promise<T>,
+): Promise<T> {
+  return withPoolOwner(jobPoolOwner(job.name), () => runJobUnderSpend(engine, job, ctx, handler));
+}
+
+async function runJobUnderSpend<T>(
   engine: BrainEngine,
   job: MinionJob,
   ctx: MinionJobContext,

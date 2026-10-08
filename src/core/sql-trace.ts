@@ -11,11 +11,15 @@
  * so `pg_stat_activity` lock samples can be attributed. TLS connections are not
  * decodable and are recorded once as `kind: "tls_untraced"`.
  *
- * Off (the default) it returns the options object untouched: no socket wrapper,
- * no per-query work.
+ * Off (the default) it adds no socket wrapper. Pool options still gain the
+ * acquire-time holder hooks (`onhold`, `onsql`): one owner tag when a
+ * connection is taken, and the last statement text when a statement is sent.
+ * Parameter values are not copied. That is the record the pool-starved exit
+ * prints; it is not this file's JSONL trace.
  */
 import { appendFileSync } from 'node:fs';
 import net from 'node:net';
+import { withPoolHoldHooks } from './pool-holds.ts';
 
 interface Pending { sql: string; kind: 'execute' | 'describe' | 'simple' | 'connect'; t: number; err?: string; flush?: boolean }
 interface TraceConnection {
@@ -126,14 +130,15 @@ async function tracedSocket(options: { host: string[]; port: number[]; path?: st
   return socket;
 }
 
-/** Returns `options` unchanged unless GBRAIN_SQL_TRACE names a file; then adds the tracing socket and a labelled application_name. */
+/** Adds holder hooks. Adds the tracing socket and a labelled application_name only when GBRAIN_SQL_TRACE names a file. */
 export function traceSqlOptions<T extends Record<string, unknown>>(options: T, pool: string): T {
+  const hooked = withPoolHoldHooks(options, pool);
   const file = process.env.GBRAIN_SQL_TRACE;
-  if (!file) return options;
+  if (!file) return hooked;
   const label = process.env.GBRAIN_SQL_TRACE_LABEL || process.argv[2] || 'gbrain';
   return {
-    ...options,
-    connection: { ...(options.connection as Record<string, unknown> | undefined), application_name: `gbrain:${label}:${process.pid}:${pool}`.slice(0, 63) },
+    ...hooked,
+    connection: { ...(hooked.connection as Record<string, unknown> | undefined), application_name: `gbrain:${label}:${process.pid}:${pool}`.slice(0, 63) },
     socket: (o: { host: string[]; port: number[]; path?: string | false }) => tracedSocket(o, file, label, pool),
   };
 }

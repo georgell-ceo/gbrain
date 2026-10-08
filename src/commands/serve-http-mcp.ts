@@ -22,6 +22,7 @@ import { resolveAuthCapabilities } from '../core/harness/capabilities.ts';
 import { resolveWritebackConfig, ambientOptsFrom } from '../core/facts/writeback-config.ts';
 import { hasScope, operationScopesAllowed } from '../core/scope.ts';
 import { summarizeMcpParams, dispatchToolCall, requestLogStatusForResult, requestMetaSessionId, acceptedPendingReceipt, unknownToolEnvelope, errorResult, dispatchRenderContext, type ToolResult } from '../mcp/dispatch.ts';
+import { mcpPoolOwner, withPoolOwner } from '../core/pool-holds.ts';
 import { toAgentError } from '../core/agent-output.ts';
 import { STATUS_TOOL_NAME, statusModeOf, statusToolResult } from '../mcp/status-mode.ts';
 import { isCallable, publishGatesFromDisabled } from '../core/ops/callable.ts';
@@ -225,7 +226,10 @@ function createMcpRequestServer(
       allowedOps: surfaceAllowedOps, surface, surfaceCeiling };
   }));
   server.setRequestHandler(ListToolsRequestSchema, async () => listMcpTools(ctx, state));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => callMcpTool(ctx, state, request));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => withPoolOwner(
+    mcpPoolOwner(extra.requestId, request.params.name),
+    () => callMcpTool(ctx, state, request),
+  ));
   return server;
 }
 

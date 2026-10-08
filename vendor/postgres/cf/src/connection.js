@@ -249,6 +249,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
 
     typeof options.debug === 'function' && options.debug(id, string, parameters, types)
+    typeof options.onsql === 'function' && options.onsql(id, string)
   }
 
   function write(x, fn) {

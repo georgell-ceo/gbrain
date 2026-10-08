@@ -40,6 +40,7 @@ import { scopeDeniedError } from '../core/ops/op-fix.ts';
 import { isCallable, publishGatesFromDisabled } from '../core/ops/callable.ts';
 import type { AuthInfo } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
+import { mcpPoolOwner, withPoolOwner } from '../core/pool-holds.ts';
 import { dispatchToolCall, requestLogStatusForResult, errorResult } from './dispatch.ts';
 import { GBRAIN_CLIENT_HEADER, resolveResultRowsMode, resultRowsForRequest } from './result-rows.ts';
 import { parseStrictParamsMode } from './validate-params.ts';
@@ -535,7 +536,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
             localFederated = await localFederatedSourceIds(engine, auth.sourceId, 'seed_default');
           } catch { /* scalar scope stands */ }
         }
-        const result = await dispatchToolCall(engine, toolName, args, {
+        const result = await withPoolOwner(mcpPoolOwner(id, toolName), async () => dispatchToolCall(engine, toolName, args, {
           remote: true,
           // WP1/D7: network transport — the dispatch-layer localOnly
           // backstop keys off this marker.
@@ -553,7 +554,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
           // IS the ceiling request_tools bounds catalog + persist by.
           surfaceCeiling: surface,
           resultRows: resultRowsForRequest(req.headers.get(GBRAIN_CLIENT_HEADER), await resolveResultRowsMode(engine, fileConfig)), // C1; row shape only, never authority
-        });
+        }));
         // Same status taxonomy as the OAuth transport (denied_after_list /
         // success_with_warnings feed the amendment-33 metric + E4 usage).
         const status = requestLogStatusForResult(result);
